@@ -1,0 +1,1 @@
+"""Rygnal interceptor module."""

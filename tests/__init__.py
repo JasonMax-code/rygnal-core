@@ -1,0 +1,1 @@
+"""Rygnal tests package."""

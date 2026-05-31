@@ -216,3 +216,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Rygnal local files
+.env
+.venv/
+__pycache__/
+*.pyc
+rygnal.db
+logs/*.jsonl

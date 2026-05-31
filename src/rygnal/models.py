@@ -1,0 +1,1 @@
+"""Rygnal shared data models."""

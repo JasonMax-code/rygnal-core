@@ -1,0 +1,1 @@
+"""Rygnal core package."""

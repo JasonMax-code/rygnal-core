@@ -1,0 +1,1 @@
+"""Rygnal audit logger module."""

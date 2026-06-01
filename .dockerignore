@@ -1,0 +1,12 @@
+.git
+.github
+.venv
+__pycache__
+.pytest_cache
+.ruff_cache
+*.pyc
+.env
+logs/*.jsonl
+demo_sandbox
+rygnal.db
+.DS_Store

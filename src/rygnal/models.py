@@ -63,6 +63,14 @@ class ApprovalStatus(StrEnum):
     REJECTED = "rejected"
 
 
+class RuntimeMode(StrEnum):
+    """Rygnal execution runtime modes."""
+
+    OBSERVE = "observe"
+    SIMULATE = "simulate"
+    ENFORCE = "enforce"
+
+
 class ToolRequest(BaseModel):
     """A tool action requested by an AI agent."""
 

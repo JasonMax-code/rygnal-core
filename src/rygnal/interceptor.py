@@ -12,6 +12,7 @@ from rygnal.models import (
     Decision,
     ExecutionStatus,
     InterceptorResult,
+    RuntimeMode,
     ToolExecutionResult,
     ToolRequest,
 )
@@ -30,12 +31,14 @@ class RygnalInterceptor:
         tool_executor: ToolExecutor,
         risk_engine: RiskEngine | None = None,
         approval_workflow: ApprovalWorkflow | None = None,
+        runtime_mode: RuntimeMode | None = None,
     ) -> None:
         self.policy_engine = policy_engine
         self.audit_logger = audit_logger
         self.tool_executor = tool_executor
         self.risk_engine = risk_engine or RiskEngine()
         self.approval_workflow = approval_workflow
+        self.runtime_mode = runtime_mode or RuntimeMode.ENFORCE
 
     def intercept(self, request: ToolRequest) -> InterceptorResult:
         """Assess risk, evaluate policy, audit, and optionally execute a tool request."""
@@ -47,6 +50,7 @@ class RygnalInterceptor:
 
         # Flatten risk metadata to top level for backward compatibility
         audit_metadata: dict[str, Any] = risk_metadata.copy()
+        audit_metadata["runtime_mode"] = self.runtime_mode.value
 
         if policy_decision.decision == Decision.REQUIRE_APPROVAL:
             approval_workflow = self.approval_workflow or ApprovalWorkflow()
@@ -95,30 +99,61 @@ class RygnalInterceptor:
         policy_decision: Any,
         approval_decision: ApprovalDecision | None,
     ) -> ToolExecutionResult:
-        if policy_decision.decision == Decision.ALLOW:
-            return self.tool_executor.execute(request)
-
-        if policy_decision.decision == Decision.SIMULATE:
+        # In OBSERVE mode, never execute - just skip
+        if self.runtime_mode == RuntimeMode.OBSERVE:
             return ToolExecutionResult(
-                status=ExecutionStatus.SIMULATED,
+                status=ExecutionStatus.SKIPPED,
                 executed=False,
-                output="Simulated decision. Tool was not executed.",
+                error="Tool execution skipped: Rygnal is in observe mode.",
             )
 
-        if policy_decision.decision == Decision.REQUIRE_APPROVAL:
-            if approval_decision and approval_decision.approved:
+        # In SIMULATE mode, never execute actual tools - simulate or skip
+        if self.runtime_mode == RuntimeMode.SIMULATE:
+            if policy_decision.decision == Decision.ALLOW:
+                return ToolExecutionResult(
+                    status=ExecutionStatus.SIMULATED,
+                    executed=False,
+                    output="Simulated tool execution (simulate mode).",
+                )
+            return ToolExecutionResult(
+                status=ExecutionStatus.SKIPPED,
+                executed=False,
+                error=f"Tool execution skipped (simulate mode): {policy_decision.decision}",
+            )
+
+        # In ENFORCE mode, respect policy decisions
+        if self.runtime_mode == RuntimeMode.ENFORCE:
+            if policy_decision.decision == Decision.ALLOW:
                 return self.tool_executor.execute(request)
+
+            if policy_decision.decision == Decision.SIMULATE:
+                return ToolExecutionResult(
+                    status=ExecutionStatus.SIMULATED,
+                    executed=False,
+                    output="Simulated decision. Tool was not executed.",
+                )
+
+            if policy_decision.decision == Decision.REQUIRE_APPROVAL:
+                if approval_decision and approval_decision.approved:
+                    return self.tool_executor.execute(request)
+
+                return ToolExecutionResult(
+                    status=ExecutionStatus.SKIPPED,
+                    executed=False,
+                    error="Tool execution skipped because approval was not granted.",
+                )
 
             return ToolExecutionResult(
                 status=ExecutionStatus.SKIPPED,
                 executed=False,
-                error="Tool execution skipped because approval was not granted.",
+                error=f"Tool execution skipped because decision is: {policy_decision.decision}",
             )
 
+        # Fallback
         return ToolExecutionResult(
             status=ExecutionStatus.SKIPPED,
             executed=False,
-            error=f"Tool execution skipped because decision is: {policy_decision.decision}",
+            error=f"Tool execution skipped: unknown runtime mode {self.runtime_mode}",
         )
 
     @staticmethod

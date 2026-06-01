@@ -1,0 +1,14 @@
+services:
+  rygnal:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: rygnal-core:local
+    working_dir: /app
+    environment:
+      APP_ENV: local
+      LOG_LEVEL: debug
+      PYTHONPATH: /app/src:/app
+    volumes:
+      - .:/app
+    command: python -m demo.run_demo

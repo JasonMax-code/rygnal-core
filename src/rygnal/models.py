@@ -91,12 +91,20 @@ class PolicyRule(BaseModel):
     decision: Decision
     severity: Severity = Severity.LOW
     reason: str
+    priority: int = Field(default=100, ge=0, le=1000)
 
     tool_name: str | None = None
     action: str | None = None
     environment: str | None = None
     target_contains: str | None = None
     input_contains: str | None = None
+
+
+class PolicySchema(BaseModel):
+    """Validated policy file schema."""
+
+    policy_version: str = "policy.v1"
+    rules: list[PolicyRule] = Field(default_factory=list)
 
 
 class PolicyDecision(BaseModel):

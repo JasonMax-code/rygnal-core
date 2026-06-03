@@ -9,14 +9,19 @@ from typing import Any
 
 import yaml
 
-from rygnal.models import Decision, PolicyDecision, PolicyRule, Severity, ToolRequest
+from rygnal.models import Decision, PolicyDecision, PolicyRule, PolicySchema, Severity, ToolRequest
 
 
 class PolicyEngine:
     """Evaluate AI-agent tool requests against policy rules."""
 
-    def __init__(self, rules: list[PolicyRule] | None = None) -> None:
-        self.rules = rules or []
+    def __init__(
+        self,
+        rules: list[PolicyRule] | None = None,
+        policy_version: str = "policy.v1",
+    ) -> None:
+        self.policy_version = policy_version
+        self.rules = sorted(rules or [], key=lambda rule: rule.priority)
 
     @classmethod
     def from_file(cls, policy_path: str | Path) -> "PolicyEngine":
@@ -27,13 +32,23 @@ class PolicyEngine:
             raise FileNotFoundError(f"Policy file not found: {path}")
 
         data = yaml.safe_load(path.read_text()) or {}
+
+        if not isinstance(data, dict):
+            raise ValueError("Policy file must be a YAML mapping.")
+
         raw_rules = data.get("rules", [])
 
         if not isinstance(raw_rules, list):
             raise ValueError("Policy file must contain a 'rules' list.")
 
-        rules = [PolicyRule(**rule) for rule in raw_rules]
-        return cls(rules=rules)
+        policy_schema = PolicySchema(
+            policy_version=data.get("policy_version", "policy.v1"),
+            rules=[PolicyRule(**rule) for rule in raw_rules],
+        )
+        return cls(
+            rules=policy_schema.rules,
+            policy_version=policy_schema.policy_version,
+        )
 
     def evaluate(self, request: ToolRequest) -> PolicyDecision:
         """Return the first matching policy decision."""

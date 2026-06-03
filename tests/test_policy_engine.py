@@ -99,3 +99,78 @@ def test_invalid_policy_file_raises_error(tmp_path: Path):
 
     with pytest.raises(ValueError):
         PolicyEngine.from_file(bad_policy)
+
+
+def test_policy_engine_loads_policy_version():
+    engine = load_default_policy_engine()
+
+    assert engine.policy_version == "policy.v2"
+
+
+def test_policy_rules_are_sorted_by_priority(tmp_path: Path):
+    policy_file = tmp_path / "priority_policy.yaml"
+    policy_file.write_text(
+        """
+policy_version: policy.v2
+rules:
+  - id: low-priority-block
+    priority: 50
+    tool_name: file_read
+    target_contains: README.md
+    decision: block
+    severity: high
+    reason: Low priority block.
+
+  - id: high-priority-allow
+    priority: 10
+    tool_name: file_read
+    target_contains: README.md
+    decision: allow
+    severity: low
+    reason: High priority allow.
+"""
+    )
+
+    engine = PolicyEngine.from_file(policy_file)
+    result = engine.evaluate(
+        ToolRequest(tool_name="file_read", action="read_file", target="README.md")
+    )
+
+    assert [rule.id for rule in engine.rules] == [
+        "high-priority-allow",
+        "low-priority-block",
+    ]
+    assert result.decision == Decision.ALLOW
+    assert result.policy_id == "high-priority-allow"
+
+
+def test_policy_engine_keeps_backward_compatibility_without_version(tmp_path: Path):
+    policy_file = tmp_path / "legacy_policy.yaml"
+    policy_file.write_text(
+        """
+rules:
+  - id: legacy-block
+    tool_name: file_read
+    target_contains: .env
+    decision: block
+    severity: critical
+    reason: Legacy policy blocks env files.
+"""
+    )
+
+    engine = PolicyEngine.from_file(policy_file)
+
+    assert engine.policy_version == "policy.v1"
+
+    result = engine.evaluate(ToolRequest(tool_name="file_read", action="read_file", target=".env"))
+
+    assert result.decision == Decision.BLOCK
+    assert result.policy_id == "legacy-block"
+
+
+def test_invalid_policy_file_mapping_raises_error(tmp_path: Path):
+    bad_policy = tmp_path / "bad_mapping.yaml"
+    bad_policy.write_text("- not-a-mapping")
+
+    with pytest.raises(ValueError, match="YAML mapping"):
+        PolicyEngine.from_file(bad_policy)

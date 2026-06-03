@@ -45,6 +45,27 @@ class RiskAssessment(BaseModel):
 class RiskEngine:
     """Deterministic risk scorer for AI-agent tool requests."""
 
+    SENSITIVE_TARGET_PATTERNS = (
+        ".env",
+        ".env.backup",
+        "secrets.yaml",
+        "secrets.yml",
+        "credentials.json",
+        "credential.json",
+        ".npmrc",
+        ".pypirc",
+        "id_rsa",
+        "id_dsa",
+        "private.key",
+        "private.pem",
+        "service-account.json",
+        "service_account.json",
+        "database.yml",
+        "database.yaml",
+        "db.yml",
+        "db.yaml",
+    )
+
     SECRET_PATTERNS = (
         re.compile(r"(?i)\bapi[_-]?key\b\s*[:=]\s*\S+"),
         re.compile(r"(?i)\btoken\b\s*[:=]\s*\S+"),
@@ -173,6 +194,16 @@ class RiskEngine:
                     severity=RiskLevel.CRITICAL,
                     score=95,
                     reason="Agent targeted an environment secret file.",
+                )
+            )
+
+        if any(pattern in target for pattern in self.SENSITIVE_TARGET_PATTERNS):
+            signals.append(
+                RiskSignal(
+                    code="sensitive-config-target",
+                    severity=RiskLevel.CRITICAL,
+                    score=90,
+                    reason="Agent targeted a sensitive configuration, credential, or key file.",
                 )
             )
 

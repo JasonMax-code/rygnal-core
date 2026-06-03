@@ -107,3 +107,29 @@ def test_customer_data_target_adds_business_data_signal():
 
     assert assessment.risk_level == RiskLevel.MEDIUM
     assert any(signal.code == "sensitive-business-data" for signal in assessment.signals)
+
+
+def test_sensitive_config_targets_are_critical_risk():
+    engine = RiskEngine()
+
+    sensitive_targets = [
+        ".env.backup",
+        "config/secrets.yaml",
+        "config/secrets.yml",
+        "credentials.json",
+        ".npmrc",
+        ".pypirc",
+        "id_rsa",
+        "private.key",
+        "service-account.json",
+        "database.yml",
+    ]
+
+    for target in sensitive_targets:
+        assessment = engine.assess(
+            ToolRequest(tool_name="file_read", action="read_file", target=target)
+        )
+
+        assert assessment.risk_level == RiskLevel.CRITICAL
+        assert assessment.risk_score >= 85
+        assert any(signal.code == "sensitive-config-target" for signal in assessment.signals)

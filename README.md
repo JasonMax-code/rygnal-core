@@ -80,3 +80,29 @@ Run validation:
 ## License
 
 Private repository. No public license selected yet.
+
+## Local Validation Environment
+
+Use a virtual environment for local validation. Some systems block installing packages into the system Python environment, so contributors should avoid relying on global Python installs.
+
+Recommended setup:
+
+    python -m venv .venv
+    source .venv/bin/activate
+    make install-dev
+
+Check that the editable package and CLI are available:
+
+    make check-install
+
+Run normal validation:
+
+    make validate
+
+Run validation plus package/CLI install checks:
+
+    make validate-local
+
+Dependency audit is included in validation:
+
+    pip-audit -r requirements-dev.txt

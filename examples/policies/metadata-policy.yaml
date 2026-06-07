@@ -1,0 +1,11 @@
+policy_version: policy.v2
+rules:
+  - id: approval-production-agent-delete
+    priority: 10
+    tool_name: file_delete
+    metadata_equals:
+      agent_tier: production
+      approval_required: true
+    decision: require_approval
+    severity: high
+    reason: Production agent deletion requires approval.

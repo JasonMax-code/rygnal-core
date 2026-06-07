@@ -1,0 +1,15 @@
+policy_version: policy.v2
+rules:
+  - id: require-approval-critical-risk
+    priority: 10
+    risk_level: critical
+    decision: require_approval
+    severity: critical
+    reason: Critical risk requires approval.
+
+  - id: block-risk-score-85
+    priority: 20
+    risk_score_min: 85
+    decision: block
+    severity: critical
+    reason: Very high risk score is blocked.

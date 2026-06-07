@@ -1,0 +1,17 @@
+policy_version: policy.v2
+rules:
+  - id: high-priority-allow-readme
+    priority: 10
+    tool_name: file_read
+    target_contains: README.md
+    decision: allow
+    severity: low
+    reason: README read is explicitly allowed.
+
+  - id: low-priority-block-readme
+    priority: 50
+    tool_name: file_read
+    target_contains: README.md
+    decision: block
+    severity: high
+    reason: Lower priority block should not win.

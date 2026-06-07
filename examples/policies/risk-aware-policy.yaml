@@ -1,0 +1,15 @@
+policy_version: policy.v2
+rules:
+  - id: require-approval-critical-risk
+    priority: 10
+    risk_level: critical
+    decision: require_approval
+    severity: critical
+    reason: Critical risk requires approval.
+
+  - id: simulate-external-api
+    priority: 20
+    tool_name: external_api_send
+    decision: simulate
+    severity: medium
+    reason: External API sends should be simulated during local testing.

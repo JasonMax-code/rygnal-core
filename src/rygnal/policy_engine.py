@@ -120,18 +120,60 @@ class PolicyEngine:
         if rule.environment and rule.environment != request.environment:
             return False
 
+        if rule.target_equals and rule.target_equals != request.target:
+            return False
+
         if rule.target_contains and rule.target_contains not in (request.target or ""):
+            return False
+
+        if rule.input_equals is not None and rule.input_equals != request.input:
             return False
 
         if rule.input_contains and rule.input_contains not in self._stringify(request.input):
             return False
 
+        if rule.metadata_equals and not self._metadata_equals(
+            request.metadata,
+            rule.metadata_equals,
+        ):
+            return False
+
+        if rule.metadata_contains and not self._metadata_contains(
+            request.metadata,
+            rule.metadata_contains,
+        ):
+            return False
         if rule.risk_level and rule.risk_level != risk_context.get("risk_level"):
             return False
 
         if rule.risk_score_min is not None:
             risk_score = risk_context.get("risk_score")
             if risk_score is None or risk_score < rule.risk_score_min:
+                return False
+        return True
+
+    @staticmethod
+    def _metadata_equals(
+        request_metadata: dict[str, Any],
+        expected_metadata: dict[str, Any],
+    ) -> bool:
+        """Return true when all expected metadata values match exactly."""
+        for key, expected_value in expected_metadata.items():
+            if request_metadata.get(key) != expected_value:
+                return False
+
+        return True
+
+    @staticmethod
+    def _metadata_contains(
+        request_metadata: dict[str, Any],
+        expected_metadata: dict[str, str],
+    ) -> bool:
+        """Return true when metadata string values contain expected text."""
+        for key, expected_value in expected_metadata.items():
+            actual_value = request_metadata.get(key)
+
+            if expected_value not in PolicyEngine._stringify(actual_value):
                 return False
 
         return True
@@ -164,11 +206,22 @@ class PolicyEngine:
         if rule.environment:
             conditions.append("environment")
 
+        if rule.target_equals:
+            conditions.append("target_equals")
+
         if rule.target_contains:
             conditions.append("target_contains")
 
+        if rule.input_equals is not None:
+            conditions.append("input_equals")
+
         if rule.input_contains:
             conditions.append("input_contains")
+        if rule.metadata_equals:
+            conditions.append("metadata_equals")
+
+        if rule.metadata_contains:
+            conditions.append("metadata_contains")
 
         if rule.risk_level:
             conditions.append("risk_level")

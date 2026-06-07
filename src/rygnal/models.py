@@ -5,7 +5,7 @@ from enum import StrEnum
 from typing import Any
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 def utc_now_iso() -> str:
@@ -87,6 +87,8 @@ class ToolRequest(BaseModel):
 class PolicyRule(BaseModel):
     """A single policy rule."""
 
+    model_config = ConfigDict(extra="forbid")
+
     id: str
     decision: Decision
     severity: Severity = Severity.LOW
@@ -96,10 +98,14 @@ class PolicyRule(BaseModel):
     tool_name: str | None = None
     action: str | None = None
     environment: str | None = None
+    target_equals: str | None = None
     target_contains: str | None = None
+    input_equals: Any | None = None
     input_contains: str | None = None
+    metadata_equals: dict[str, Any] = Field(default_factory=dict)
+    metadata_contains: dict[str, str] = Field(default_factory=dict)
     risk_level: str | None = None
-    risk_score_min: int | None = Field(default=None, ge=0, le=100)
+    risk_score_min: float | None = None
 
 
 class PolicySchema(BaseModel):

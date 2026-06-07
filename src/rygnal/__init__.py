@@ -7,6 +7,7 @@ from rygnal.approval import (
     reject_for_testing,
 )
 from rygnal.audit_logger import AuditLogger
+from rygnal.audit_storage import SQLiteAuditStore
 from rygnal.cli_approval import CLIApprovalResolver, build_cli_approval_workflow
 from rygnal.core import Rygnal
 from rygnal.interceptor import RygnalInterceptor
@@ -69,6 +70,7 @@ __all__ = [
     "Rygnal",
     "RygnalInterceptor",
     "Severity",
+    "SQLiteAuditStore",
     "ToolExecutionResult",
     "ToolExecutor",
     "ToolRequest",

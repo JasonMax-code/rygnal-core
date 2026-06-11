@@ -45,7 +45,7 @@ class RygnalInterceptor:
         risk_assessment = self.risk_engine.assess(request)
         risk_metadata = self._risk_metadata(risk_assessment)
 
-        policy_decision = self.policy_engine.evaluate(request)
+        policy_decision = self.policy_engine.evaluate(request, risk_assessment=risk_assessment)
         approval_decision: ApprovalDecision | None = None
 
         # Flatten risk metadata to top level for backward compatibility

@@ -94,3 +94,41 @@ rules:
     assert result.policy_id is None
     assert result.explanation is not None
     assert result.explanation.default_decision is True
+
+
+def test_interceptor_passes_risk_assessment_into_policy_evaluation(tmp_path: Path):
+    policy_file = tmp_path / "risk_runtime_policy.yaml"
+    policy_file.write_text(
+        """
+policy_version: policy.v2
+default_decision: allow
+rules:
+  - id: block-critical-runtime-risk
+    priority: 5
+    risk_level: critical
+    decision: block
+    severity: critical
+    reason: Critical runtime risk is blocked.
+"""
+    )
+
+    from rygnal.audit_logger import AuditLogger
+    from rygnal.interceptor import RygnalInterceptor
+    from rygnal.tool_executor import ToolExecutor
+
+    engine = PolicyEngine.from_file(policy_file)
+    interceptor = RygnalInterceptor(
+        policy_engine=engine,
+        audit_logger=AuditLogger(tmp_path / "audit_log.jsonl"),
+        tool_executor=ToolExecutor(),
+    )
+
+    result = interceptor.intercept(
+        ToolRequest(tool_name="file_read", action="read_file", target=".env")
+    )
+
+    assert result.risk_assessment["risk_level"] == "critical"
+    assert result.policy_decision.decision == Decision.BLOCK
+    assert result.policy_decision.policy_id == "block-critical-runtime-risk"
+    assert result.policy_decision.explanation is not None
+    assert "risk_level" in result.policy_decision.explanation.matched_conditions

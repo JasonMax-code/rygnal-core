@@ -215,6 +215,7 @@ def test_policy_decision_includes_explain_output_for_default_allow():
     ]
     assert result.explanation.default_decision is True
 
+
 def test_policy_file_requires_explicit_default_decision(tmp_path: Path):
     policy_file = tmp_path / "missing_default_decision.yaml"
     policy_file.write_text(

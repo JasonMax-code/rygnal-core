@@ -9,7 +9,10 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from examples.shared import build_demo_rygnal
 from rygnal import Decision, ExecutionStatus, Rygnal, ToolRequest
+
+__all__ = ("build_demo_rygnal", "handle_openai_tool_call")
 
 
 def handle_openai_tool_call(tool_call: dict[str, Any], rygnal: Rygnal) -> dict[str, Any]:
@@ -47,20 +50,6 @@ def handle_openai_tool_call(tool_call: dict[str, Any], rygnal: Rygnal) -> dict[s
         "audit_event_id": result.audit_event.event_id,
         "output": result.execution.output if result.execution.executed else None,
     }
-
-
-def build_demo_rygnal(audit_log_path: str) -> Rygnal:
-    """Build a demo Rygnal instance with a registered file read handler."""
-    rygnal = Rygnal.from_defaults(audit_log_path=audit_log_path)
-
-    def safe_file_read(request: ToolRequest) -> dict[str, str | None]:
-        return {
-            "target": request.target,
-            "content": f"demo content from {request.target}",
-        }
-
-    rygnal.register_tool("file_read", safe_file_read)
-    return rygnal
 
 
 def _parse_arguments(raw_arguments: Any) -> dict[str, Any]:

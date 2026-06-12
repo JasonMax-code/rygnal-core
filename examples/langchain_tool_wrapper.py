@@ -6,7 +6,10 @@ from typing import Any
 
 from langchain_core.tools import StructuredTool
 
+from examples.shared import build_demo_rygnal
 from rygnal import Decision, ExecutionStatus, Rygnal, ToolRequest
+
+__all__ = ("build_demo_rygnal", "build_rygnal_file_read_tool")
 
 
 def build_rygnal_file_read_tool(rygnal: Rygnal) -> StructuredTool:
@@ -46,20 +49,6 @@ def build_rygnal_file_read_tool(rygnal: Rygnal) -> StructuredTool:
             "execution safety, and audit logging."
         ),
     )
-
-
-def build_demo_rygnal(audit_log_path: str) -> Rygnal:
-    """Build a demo Rygnal instance with a simple registered file read handler."""
-    rygnal = Rygnal.from_defaults(audit_log_path=audit_log_path)
-
-    def safe_file_read(request: ToolRequest) -> dict[str, str | None]:
-        return {
-            "target": request.target,
-            "content": f"demo content from {request.target}",
-        }
-
-    rygnal.register_tool("file_read", safe_file_read)
-    return rygnal
 
 
 def _normalize_risk(risk_assessment: Any) -> dict[str, Any]:

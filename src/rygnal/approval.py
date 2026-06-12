@@ -6,6 +6,11 @@ Approval Workflow v1 handles actions that require human approval before executio
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from rygnal.approval_authorization import (
+    ApprovalAuthorizationEngine,
+    ApprovalAuthorizationResult,
+    ApprovalReviewerPermission,
+)
 from rygnal.models import (
     ApprovalDecision,
     ApprovalRequest,
@@ -29,9 +34,16 @@ class ApprovalWorkflow:
         self,
         resolver: ApprovalResolver | None = None,
         reviewer_roles: Mapping[str, str] | None = None,
+        reviewer_permissions: Mapping[str, ApprovalReviewerPermission] | None = None,
+        authorization_engine: ApprovalAuthorizationEngine | None = None,
     ) -> None:
         self.resolver = resolver or reject_by_default
-        self.reviewer_roles = dict(reviewer_roles or {})
+        self.authorization_engine = authorization_engine or ApprovalAuthorizationEngine(
+            reviewer_permissions=_build_reviewer_permissions(
+                reviewer_roles=reviewer_roles,
+                reviewer_permissions=reviewer_permissions,
+            )
+        )
 
     def request_approval(
         self,
@@ -39,7 +51,7 @@ class ApprovalWorkflow:
         policy_decision: PolicyDecision,
         risk_assessment: dict[str, Any] | None = None,
     ) -> tuple[ApprovalRequest, ApprovalDecision]:
-        """Create an approval request and return the approval decision."""
+        """Create an approval request and return the authorized approval decision."""
         approval_request = ApprovalRequest(
             trace_id=str(request.metadata.get("trace_id") or new_trace_id()),
             requested_by=request.user_id,
@@ -59,16 +71,15 @@ class ApprovalWorkflow:
         if approval_decision.approval_id != approval_request.approval_id:
             raise ValueError("Approval decision ID does not match approval request ID.")
 
-        approval_decision = _enforce_self_approval_guard(
-            approval_request,
-            approval_decision,
-        )
-        approval_decision = _enforce_reviewer_role_guard(
-            approval_decision,
-            self.reviewer_roles,
+        authorization_result = self.authorization_engine.authorize(
+            approval_request=approval_request,
+            approval_decision=approval_decision,
         )
 
-        return approval_request, approval_decision
+        return approval_request, _apply_authorization_result(
+            approval_decision=approval_decision,
+            authorization_result=authorization_result,
+        )
 
 
 def reject_by_default(approval_request: ApprovalRequest) -> ApprovalDecision:
@@ -115,52 +126,19 @@ def reject_for_testing(
     )
 
 
-def _enforce_self_approval_guard(
-    approval_request: ApprovalRequest,
+def _apply_authorization_result(
+    *,
     approval_decision: ApprovalDecision,
+    authorization_result: ApprovalAuthorizationResult,
 ) -> ApprovalDecision:
-    """Reject approvals where the requester approves their own action."""
-    if not approval_decision.approved:
-        return approval_decision
+    """Apply authorization result to an approval decision without mutating it."""
+    metadata = {
+        **approval_decision.metadata,
+        **authorization_result.metadata,
+    }
 
-    if approval_decision.decided_by != approval_request.requested_by:
-        return approval_decision
-
-    return ApprovalDecision(
-        approval_id=approval_request.approval_id,
-        status=ApprovalStatus.REJECTED,
-        approved=False,
-        decided_by="system",
-        decided_at=utc_now_iso(),
-        reason=("Self-approval rejected: requester cannot approve their own approval request."),
-        metadata={
-            **approval_decision.metadata,
-            "guard": "self-approval",
-            "attempted_decided_by": approval_decision.decided_by,
-        },
-    )
-
-
-def _enforce_reviewer_role_guard(
-    approval_decision: ApprovalDecision,
-    reviewer_roles: Mapping[str, str],
-) -> ApprovalDecision:
-    """Reject approvals from roles that are not allowed to approve."""
-    if not approval_decision.approved:
-        return approval_decision
-
-    if approval_decision.decided_by is None:
-        return approval_decision
-
-    reviewer_role = reviewer_roles.get(approval_decision.decided_by)
-
-    if reviewer_role is None:
-        return approval_decision
-
-    normalized_role = reviewer_role.strip().lower()
-
-    if normalized_role not in DENIED_APPROVER_ROLES:
-        return approval_decision
+    if authorization_result.allowed:
+        return approval_decision.model_copy(update={"metadata": metadata})
 
     return ApprovalDecision(
         approval_id=approval_decision.approval_id,
@@ -168,17 +146,27 @@ def _enforce_reviewer_role_guard(
         approved=False,
         decided_by="system",
         decided_at=utc_now_iso(),
-        reason=(
-            f"Viewer-role approval rejected: reviewer role '{reviewer_role}' "
-            "cannot approve protected actions."
-        ),
-        metadata={
-            **approval_decision.metadata,
-            "guard": "viewer-role",
-            "attempted_decided_by": approval_decision.decided_by,
-            "reviewer_role": reviewer_role,
-        },
+        reason=authorization_result.reason,
+        metadata=metadata,
     )
+
+
+def _build_reviewer_permissions(
+    *,
+    reviewer_roles: Mapping[str, str] | None,
+    reviewer_permissions: Mapping[str, ApprovalReviewerPermission] | None,
+) -> dict[str, ApprovalReviewerPermission]:
+    """Build reviewer permissions from explicit permissions and legacy role mapping."""
+    permissions = dict(reviewer_permissions or {})
+
+    for reviewer, role in dict(reviewer_roles or {}).items():
+        normalized_role = role.strip().lower()
+        permissions[reviewer] = ApprovalReviewerPermission(
+            role=role,
+            can_approve=normalized_role not in DENIED_APPROVER_ROLES,
+        )
+
+    return permissions
 
 
 def _redacted_mapping(value: dict[str, Any] | None) -> dict[str, Any]:

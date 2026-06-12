@@ -7,9 +7,12 @@ risk scoring for AI-agent tool requests before execution.
 from __future__ import annotations
 
 import re
+import shlex
 from collections.abc import Iterable
 from enum import StrEnum
+from ipaddress import ip_address
 from typing import Any, Protocol
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field
 
@@ -353,6 +356,142 @@ class InputSensitivityDetector:
         return signals
 
 
+class NormalizedCommandRiskDetector:
+    """Detect dangerous shell command variants after normalization."""
+
+    def detect(self, context: RiskContext) -> list[RiskSignal]:
+        normalized_command = normalize_shell_command(context.input_text)
+
+        if not normalized_command or not is_recursive_force_remove(normalized_command):
+            return []
+
+        return [
+            RiskSignal(
+                code="dangerous-shell-pattern",
+                category=RiskSignalCategory.COMMAND,
+                severity=RiskLevel.CRITICAL,
+                score=90,
+                confidence=0.95,
+                reason=("Agent command contains recursive forced deletion after normalization."),
+                evidence={
+                    "normalized_command": normalized_command,
+                    "pattern": "rm-recursive-force",
+                },
+                reversible=False,
+            )
+        ]
+
+
+class SensitivePathRiskDetector:
+    """Detect sensitive path classes beyond exact filename matching."""
+
+    def detect(self, context: RiskContext) -> list[RiskSignal]:
+        classification = classify_sensitive_path(context.target_text)
+
+        if classification is None:
+            return []
+
+        return [
+            RiskSignal(
+                code="sensitive-path-target",
+                category=RiskSignalCategory.ASSET,
+                severity=RiskLevel.CRITICAL,
+                score=90,
+                confidence=0.95,
+                reason=f"Agent targeted sensitive path class: {classification}.",
+                evidence={
+                    "target": context.target_text,
+                    "classification": classification,
+                },
+                reversible=False,
+            )
+        ]
+
+
+class RiskyDestinationDetector:
+    """Detect risky network destinations for data movement."""
+
+    def detect(self, context: RiskContext) -> list[RiskSignal]:
+        signals: list[RiskSignal] = []
+
+        for url in extract_urls(context.input_text):
+            classification = classify_risky_destination(url)
+
+            if classification is None:
+                continue
+
+            signals.append(
+                RiskSignal(
+                    code="risky-destination",
+                    category=RiskSignalCategory.DESTINATION,
+                    severity=RiskLevel.HIGH,
+                    score=40,
+                    confidence=0.9,
+                    reason=(f"Agent targeted risky network destination: {classification}."),
+                    evidence={
+                        "url": url,
+                        "classification": classification,
+                    },
+                    reversible=False,
+                )
+            )
+
+        return signals
+
+
+class DestructiveActionVariantDetector:
+    """Detect destructive action naming variants."""
+
+    def detect(self, context: RiskContext) -> list[RiskSignal]:
+        if not is_destructive_action_variant(context):
+            return []
+
+        return [
+            RiskSignal(
+                code="destructive-action",
+                category=RiskSignalCategory.CAPABILITY,
+                severity=RiskLevel.HIGH,
+                score=60,
+                confidence=0.9,
+                reason="Agent requested a destructive action variant.",
+                evidence={
+                    "tool_name": context.tool_name,
+                    "action": context.action or "",
+                },
+                reversible=False,
+            )
+        ]
+
+
+class CompoundRiskCorrelationDetector:
+    """Escalate combinations of independently risky request attributes."""
+
+    def detect(self, context: RiskContext) -> list[RiskSignal]:
+        if (
+            context.environment.lower() == "production"
+            and is_destructive_action_variant(context)
+            and contains_sensitive_business_target(context.target_text)
+        ):
+            return [
+                RiskSignal(
+                    code="compound-risk-escalation",
+                    category=RiskSignalCategory.ENVIRONMENT,
+                    severity=RiskLevel.CRITICAL,
+                    score=40,
+                    confidence=0.95,
+                    reason=("Production destructive action targets sensitive business data."),
+                    evidence={
+                        "environment": context.environment,
+                        "action": context.action or "",
+                        "target": context.target_text,
+                    },
+                    reversible=False,
+                )
+            ]
+
+        return []
+
+
 class EnvironmentDetector:
     """Detect risk based on execution environment."""
 
@@ -388,6 +527,11 @@ class RiskSignalRegistry:
             detectors=[
                 ToolCapabilityDetector(),
                 TargetSensitivityDetector(),
+                NormalizedCommandRiskDetector(),
+                SensitivePathRiskDetector(),
+                RiskyDestinationDetector(),
+                DestructiveActionVariantDetector(),
+                CompoundRiskCorrelationDetector(),
                 InputSensitivityDetector(),
                 EnvironmentDetector(),
             ]
@@ -462,6 +606,132 @@ class RiskEngine:
     ) -> str:
         signal_codes = ", ".join(signal.code for signal in signals)
         return f"Risk score {risk_score} mapped to {risk_level.value} based on: {signal_codes}."
+
+
+def normalize_shell_command(command: str) -> str:
+    """Normalize shell-like command text for deterministic risk detection."""
+    if not command:
+        return ""
+
+    collapsed = " ".join(command.strip().lower().split())
+
+    try:
+        tokens = shlex.split(collapsed)
+    except ValueError:
+        tokens = collapsed.split()
+
+    if len(tokens) >= 3 and tokens[0] in {"sh", "bash"} and tokens[1] == "-c":
+        return normalize_shell_command(tokens[2])
+
+    return " ".join(tokens)
+
+
+def is_recursive_force_remove(normalized_command: str) -> bool:
+    """Return true for rm variants that combine recursive and force deletion."""
+    try:
+        tokens = shlex.split(normalized_command)
+    except ValueError:
+        tokens = normalized_command.split()
+
+    if tokens and tokens[0] == "sudo":
+        tokens = tokens[1:]
+
+    if not tokens or tokens[0] != "rm":
+        return False
+
+    flags = "".join(token.lstrip("-") for token in tokens[1:] if token.startswith("-"))
+
+    return "r" in flags and "f" in flags
+
+
+def classify_sensitive_path(target: str) -> str | None:
+    """Classify sensitive file-system target paths."""
+    normalized_target = target.strip().replace("\\", "/").lower()
+
+    if not normalized_target:
+        return None
+
+    if normalized_target.startswith("/etc/"):
+        return "system-config"
+
+    if normalized_target.startswith("~/.ssh/") or "/.ssh/" in normalized_target:
+        return "ssh-credential"
+
+    if "../" in normalized_target and any(
+        marker in normalized_target for marker in ("secret", ".env", "credential", "token", "key")
+    ):
+        return "traversal-sensitive-target"
+
+    return None
+
+
+def extract_urls(value: str) -> list[str]:
+    """Extract URL-like values from stringified tool input."""
+    return re.findall(r"https?://[^\s'\"<>},]+", value)
+
+
+def classify_risky_destination(url: str) -> str | None:
+    """Classify network destinations that are risky for exfiltration."""
+    parsed = urlparse(url)
+    hostname = (parsed.hostname or "").lower()
+
+    if parsed.scheme != "https":
+        return "non-https"
+
+    if hostname == "localhost":
+        return "local-network"
+
+    try:
+        host_ip = ip_address(hostname)
+    except ValueError:
+        return None
+
+    if host_ip.compressed == "169.254.169.254":
+        return "cloud-metadata"
+
+    if host_ip.is_unspecified:
+        return "local-network"
+
+    if host_ip.is_loopback or host_ip.is_private or host_ip.is_link_local:
+        return "private-network"
+
+    return None
+
+
+def normalized_identifier(value: str | None) -> str:
+    """Normalize identifiers used in tool and action names."""
+    return (value or "").strip().lower().replace("-", "_")
+
+
+def is_destructive_action_variant(context: RiskContext) -> bool:
+    """Return true when tool/action naming indicates destructive intent."""
+    identifiers = {
+        normalized_identifier(context.tool_name),
+        normalized_identifier(context.action),
+    }
+
+    destructive_prefixes = (
+        "delete",
+        "remove",
+        "destroy",
+        "wipe",
+        "truncate",
+        "drop",
+    )
+
+    return any(
+        identifier.startswith(prefix) or f"_{prefix}_" in f"_{identifier}_"
+        for identifier in identifiers
+        for prefix in destructive_prefixes
+    )
+
+
+def contains_sensitive_business_target(target: str) -> bool:
+    """Return true when target text indicates sensitive business data."""
+    normalized_target = target.lower()
+    return any(
+        keyword in normalized_target for keyword in ("customer", "user", "payment", "invoice")
+    )
 
 
 def stringify_value(value: Any) -> str:

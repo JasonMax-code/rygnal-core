@@ -72,6 +72,42 @@ class RuntimeMode(StrEnum):
     PRODUCTION_SAFE = "production_safe"
 
 
+class RolePermission(BaseModel):
+    """Operator-configured approval permissions for a reviewer role."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    role: str = Field(min_length=1)
+    allowed_severities: list[Severity] = Field(min_length=1)
+    allowed_actions: list[str] | None = None
+    environments: list[str] | None = None
+
+    @field_validator("role")
+    @classmethod
+    def _reject_blank_role(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Role must not be blank.")
+
+        return value
+
+    @field_validator("allowed_actions", "environments")
+    @classmethod
+    def _reject_empty_or_blank_string_lists(
+        cls,
+        value: list[str] | None,
+    ) -> list[str] | None:
+        if value is None:
+            return value
+
+        if not value:
+            raise ValueError("Role permission lists must not be empty.")
+
+        if any(not item.strip() for item in value):
+            raise ValueError("Role permission list values must not be blank.")
+
+        return value
+
+
 class ToolRequest(BaseModel):
     """A tool action requested by an AI agent."""
 

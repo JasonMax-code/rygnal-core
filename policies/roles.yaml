@@ -1,0 +1,15 @@
+roles:
+  viewer:
+    role: viewer
+    allowed_severities:
+      - low
+    allowed_actions: null
+    environments: null
+
+  security_approver:
+    role: security_approver
+    allowed_severities:
+      - high
+      - critical
+    allowed_actions: null
+    environments: null

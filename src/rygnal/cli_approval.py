@@ -22,6 +22,8 @@ from rygnal.models import (
 NON_INTERACTIVE_REJECTION_REASON = (
     "Approval requested in non-interactive terminal mode. Rejected by default."
 )
+TIMEOUT_REJECTION_REASON = "Approval timed out. Rejected by default."
+INTERRUPTED_REJECTION_REASON = "Approval was interrupted. Rejected by default."
 
 
 class ApprovalTimeoutError(TimeoutError):
@@ -52,14 +54,31 @@ class CLIApprovalResolver:
             return self._reject(
                 approval_request,
                 reason=NON_INTERACTIVE_REJECTION_REASON,
+                metadata=_default_rejection_metadata(
+                    guard="non-interactive-terminal",
+                    approval_outcome="non_interactive",
+                ),
             )
 
         try:
             response = self._read_input("Approve this action? [y/N]: ")
-        except (ApprovalTimeoutError, EOFError, KeyboardInterrupt):
+        except ApprovalTimeoutError:
             return self._reject(
                 approval_request,
-                reason="Approval timed out or was interrupted. Rejected by default.",
+                reason=TIMEOUT_REJECTION_REASON,
+                metadata=_default_rejection_metadata(
+                    guard="approval-timeout",
+                    approval_outcome="timeout",
+                ),
+            )
+        except (EOFError, KeyboardInterrupt):
+            return self._reject(
+                approval_request,
+                reason=INTERRUPTED_REJECTION_REASON,
+                metadata=_default_rejection_metadata(
+                    guard="approval-interrupted",
+                    approval_outcome="interrupted",
+                ),
             )
 
         normalized = response.strip().lower()
@@ -114,7 +133,12 @@ class CLIApprovalResolver:
             signal.alarm(0)
             signal.signal(signal.SIGALRM, previous_handler)
 
-    def _reject(self, approval_request: ApprovalRequest, reason: str) -> ApprovalDecision:
+    def _reject(
+        self,
+        approval_request: ApprovalRequest,
+        reason: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> ApprovalDecision:
         return ApprovalDecision(
             approval_id=approval_request.approval_id,
             status=ApprovalStatus.REJECTED,
@@ -122,6 +146,7 @@ class CLIApprovalResolver:
             decided_by=self.approver,
             decided_at=utc_now_iso(),
             reason=reason,
+            metadata=metadata or {},
         )
 
 
@@ -140,3 +165,15 @@ def build_cli_approval_workflow(
 
 def _raise_timeout(_signum: int, _frame: Any) -> None:
     raise ApprovalTimeoutError("CLI approval timed out.")
+
+
+def _default_rejection_metadata(
+    *,
+    guard: str,
+    approval_outcome: str,
+) -> dict[str, Any]:
+    return {
+        "guard": guard,
+        "approval_outcome": approval_outcome,
+        "rejected_by_default": True,
+    }

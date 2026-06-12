@@ -1,8 +1,9 @@
 import builtins
+import json
 
 from demo.scenario_runner import ScenarioRunner
 from rygnal.approval import ApprovalWorkflow
-from rygnal.cli_approval import CLIApprovalResolver
+from rygnal.cli_approval import ApprovalTimeoutError, CLIApprovalResolver
 from rygnal.models import ApprovalRequest, ApprovalStatus, ExecutionStatus
 
 
@@ -164,3 +165,62 @@ def test_non_interactive_cli_approval_skips_execution_and_records_audit(
     audit_log = (tmp_path / "audit_log.jsonl").read_text()
     assert "non-interactive" in audit_log.lower()
     assert "rejected by default" in audit_log.lower()
+
+
+def test_cli_approval_resolver_timeout_rejects_with_metadata():
+    def raise_timeout(_prompt):
+        raise ApprovalTimeoutError("approval timed out")
+
+    resolver = CLIApprovalResolver(
+        approver="timeout_reviewer",
+        timeout_seconds=None,
+        input_func=raise_timeout,
+        output_func=lambda _message: None,
+    )
+
+    decision = resolver(make_request())
+
+    assert decision.status == ApprovalStatus.REJECTED
+    assert decision.approved is False
+    assert decision.decided_by == "timeout_reviewer"
+    assert "timed out" in decision.reason.lower()
+    assert "rejected by default" in decision.reason.lower()
+    assert decision.metadata["guard"] == "approval-timeout"
+    assert decision.metadata["approval_outcome"] == "timeout"
+    assert decision.metadata["rejected_by_default"] is True
+
+
+def test_cli_approval_timeout_skips_execution_and_records_audit_metadata(tmp_path):
+    def raise_timeout(_prompt):
+        raise ApprovalTimeoutError("approval timed out")
+
+    resolver = CLIApprovalResolver(
+        approver="timeout_reviewer",
+        timeout_seconds=None,
+        input_func=raise_timeout,
+        output_func=lambda _message: None,
+    )
+
+    runner = ScenarioRunner(
+        sandbox_path=tmp_path / "sandbox",
+        audit_log_path=tmp_path / "audit_log.jsonl",
+        approval_workflow=ApprovalWorkflow(resolver=resolver),
+    )
+
+    outcomes = runner.run_all()
+    outcome = next(item for item in outcomes if item.scenario.name == "file-delete-approval")
+
+    assert outcome.result.approval_decision is not None
+    assert outcome.result.approval_decision.status == ApprovalStatus.REJECTED
+    assert outcome.result.approval_decision.approved is False
+    assert outcome.result.execution.status == ExecutionStatus.SKIPPED
+    assert outcome.result.execution.executed is False
+    assert (tmp_path / "sandbox" / "customer_data.csv").exists()
+
+    events = [json.loads(line) for line in (tmp_path / "audit_log.jsonl").read_text().splitlines()]
+    approval_event = next(event for event in events if event["metadata"].get("approval"))
+
+    approval_metadata = approval_event["metadata"]["approval"]["metadata"]
+    assert approval_metadata["guard"] == "approval-timeout"
+    assert approval_metadata["approval_outcome"] == "timeout"
+    assert approval_metadata["rejected_by_default"] is True

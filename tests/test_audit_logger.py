@@ -131,3 +131,57 @@ def test_audit_logger_detects_tampering(tmp_path):
     log_path.write_text(json.dumps(saved_event) + "\n")
 
     assert logger.verify_integrity() is False
+
+
+def test_audit_logger_detects_middle_event_payload_tampering_in_hash_chain(tmp_path):
+    log_path = tmp_path / "audit_log.jsonl"
+    logger = AuditLogger(log_path)
+
+    decision = PolicyDecision(
+        decision=Decision.ALLOW,
+        allowed=True,
+        severity=Severity.LOW,
+        reason="Allowed.",
+    )
+
+    logger.log_decision(ToolRequest(tool_name="file_read", target="README.md"), decision)
+    logger.log_decision(ToolRequest(tool_name="file_read", target="docs/index.md"), decision)
+    logger.log_decision(ToolRequest(tool_name="file_read", target="SECURITY.md"), decision)
+
+    assert logger.verify_integrity() is True
+
+    events = [json.loads(line) for line in log_path.read_text().splitlines()]
+    events[1]["target"] = "tampered-middle-event.md"
+    log_path.write_text(
+        "\n".join(json.dumps(event, sort_keys=True) for event in events) + "\n",
+        encoding="utf-8",
+    )
+
+    assert logger.verify_integrity() is False
+
+
+def test_audit_logger_detects_prev_hash_link_tampering(tmp_path):
+    log_path = tmp_path / "audit_log.jsonl"
+    logger = AuditLogger(log_path)
+
+    decision = PolicyDecision(
+        decision=Decision.ALLOW,
+        allowed=True,
+        severity=Severity.LOW,
+        reason="Allowed.",
+    )
+
+    first = logger.log_decision(ToolRequest(tool_name="file_read", target="README.md"), decision)
+    logger.log_decision(ToolRequest(tool_name="file_read", target="docs/index.md"), decision)
+
+    assert first.event_hash
+    assert logger.verify_integrity() is True
+
+    events = [json.loads(line) for line in log_path.read_text().splitlines()]
+    events[1]["prev_event_hash"] = "0" * 64
+    log_path.write_text(
+        "\n".join(json.dumps(event, sort_keys=True) for event in events) + "\n",
+        encoding="utf-8",
+    )
+
+    assert logger.verify_integrity() is False

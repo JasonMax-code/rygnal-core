@@ -105,9 +105,12 @@ class AuditLogger:
 
         for event in events:
             expected_hash = event.event_hash
-            event.prev_event_hash = previous_hash
-            event.event_hash = None
+            stored_previous_hash = event.prev_event_hash
 
+            if stored_previous_hash != previous_hash:
+                return False
+
+            event.event_hash = None
             actual_hash = self._calculate_event_hash(event)
 
             if actual_hash != expected_hash:

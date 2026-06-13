@@ -7,10 +7,10 @@ from rygnal.guarded_worktree import GuardedWorktree, GuardedWorktreeConfig, crea
 from rygnal.workspace_cleanup import (
     CleanupStatus,
     GuardedWorkspaceCleanupError,
+    _run_git as real_run_git,
     _verify_deletion_guards,
     destroy_worktree,
     reset_worktree,
-    _run_git as real_run_git,
 )
 
 
@@ -56,7 +56,9 @@ def test_deletion_guards_reject_dangerous_paths(tmp_path: Path) -> None:
         
     # 4. Outside run root
     outside_ws = tmp_path / "rogue_dir" / "worktree"
-    with pytest.raises(GuardedWorkspaceCleanupError, match="outside the configured Rygnal run root"):
+    with pytest.raises(
+        GuardedWorkspaceCleanupError, match="outside the configured Rygnal run root"
+    ):
         _verify_deletion_guards(trusted, outside_ws, run_root)
 
 
@@ -90,7 +92,9 @@ def test_destroy_worktree_uses_git_removal_by_default(mock_repo_and_worktree) ->
     assert str(worktree.workspace_path) not in worktrees
 
 
-def test_destroy_worktree_falls_back_to_rmtree_and_prune(mock_repo_and_worktree, monkeypatch) -> None:
+def test_destroy_worktree_falls_back_to_rmtree_and_prune(
+    mock_repo_and_worktree, monkeypatch
+) -> None:
     config, worktree = mock_repo_and_worktree
 
     # Force the git worktree remove command to fail to trigger the fallback

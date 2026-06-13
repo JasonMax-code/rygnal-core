@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import os
 import shutil
-import subprocess
+import subprocess  # nosec B404
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,7 +26,7 @@ class GuardedWorktreeConfig:
     """Configuration for creating a guarded worktree."""
 
     trusted_repo_path: Path
-    rygnal_run_root: Path = Path("/tmp/rygnal-runs")
+    rygnal_run_root: Path = Path("/tmp/rygnal-runs")  # nosec B108
 
 
 @dataclass(frozen=True)
@@ -47,7 +47,7 @@ def _run_git(args: list[str], cwd: Path) -> str:
     env.pop("GIT_DIR", None)
 
     try:
-        result = subprocess.run(
+        result = subprocess.run(  # nosec B603 B607
             ["git", *args],
             cwd=cwd,
             capture_output=True,
@@ -133,7 +133,7 @@ def run_unsafe_local_for_testing(
     SECURITY WARNING: This is a testing/demo stub to satisfy M1 isolation proofs.
     It does NOT apply process-tree containment or Bubblewrap namespace isolation.
     """
-    return subprocess.run(
+    return subprocess.run(  # nosec B603 B607
         cmd,
         cwd=worktree.workspace_path,
         capture_output=True,

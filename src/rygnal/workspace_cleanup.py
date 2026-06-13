@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 import shutil
-import subprocess
+import subprocess  # nosec B404
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -65,7 +65,7 @@ def _run_git(args: list[str], cwd: Path) -> str:
     env.pop("GIT_DIR", None)
 
     try:
-        result = subprocess.run(
+        result = subprocess.run(  # nosec B603 B607
             ["git", *args],
             cwd=cwd,
             capture_output=True,

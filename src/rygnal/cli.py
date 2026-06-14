@@ -7,6 +7,7 @@ import sys
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
+from rygnal.cli_run import default_guarded_run_root, run_guarded_cli
 from rygnal.policy_engine import PolicyEngine
 
 
@@ -32,6 +33,71 @@ def build_parser() -> argparse.ArgumentParser:
 
     version_parser = subparsers.add_parser("version", help="Show Rygnal version.")
     version_parser.set_defaults(command=run_version)
+
+    run_parser = subparsers.add_parser(
+        "run",
+        help="Run an agent command inside a guarded workspace.",
+    )
+    run_parser.add_argument(
+        "--repo",
+        type=Path,
+        default=Path.cwd(),
+        help="Trusted repository path. Defaults to current directory.",
+    )
+    run_parser.add_argument(
+        "--timeout",
+        type=int,
+        default=300,
+        help="Command timeout in seconds.",
+    )
+    run_parser.add_argument(
+        "--run-root",
+        type=Path,
+        default=default_guarded_run_root(),
+        help="Directory for guarded run workspaces.",
+    )
+    run_parser.add_argument(
+        "--preserve-workspace",
+        action="store_true",
+        help="Preserve guarded workspace after run for debugging.",
+    )
+    run_parser.add_argument(
+        "--unsafe-local",
+        action="store_true",
+        help="Explicitly allow unsafe local execution. Not a containment backend.",
+    )
+    run_parser.add_argument(
+        "--allow-dirty",
+        action="store_true",
+        help="Allow tracked dirty trusted repo state. Use carefully.",
+    )
+    run_parser.add_argument(
+        "--audit-log",
+        type=Path,
+        default=None,
+        help="Write audit events to this JSONL file.",
+    )
+    run_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON summary.",
+    )
+    run_parser.add_argument(
+        "--show-stdout",
+        action="store_true",
+        help="Print guarded command stdout.",
+    )
+    run_parser.add_argument(
+        "--show-stderr",
+        action="store_true",
+        help="Print guarded command stderr.",
+    )
+    run_parser.add_argument(
+        "agent_command",
+        nargs=argparse.REMAINDER,
+        help="Command to run after --.",
+    )
+    run_parser.set_defaults(command=run_guarded_cli, command_name="run")
 
     demo_parser = subparsers.add_parser("demo", help="Run Rygnal demo commands.")
     demo_subparsers = demo_parser.add_subparsers(dest="demo_command", required=True)

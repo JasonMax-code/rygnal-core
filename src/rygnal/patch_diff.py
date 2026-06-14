@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shlex
 import shutil
 import subprocess  # nosec B404
 import tempfile
@@ -124,6 +125,13 @@ class _LineStats:
     binary: bool
 
 
+@dataclass(frozen=True)
+class _PatchModeMetadata:
+    old_mode: str | None = None
+    new_mode: str | None = None
+    mode_changed: bool = False
+
+
 def generate_patch_diff(
     workspace_path: str | Path,
     baseline_commit_sha: str,
@@ -163,9 +171,11 @@ def generate_patch_diff_from_report(report: ChangedFileReport) -> PatchDiff:
         report=report,
     )
     stats_by_path = parse_git_numstat(numstat_bytes)
+    mode_by_path = parse_git_patch_modes(patch_bytes)
 
     patch_files = tuple(
-        _build_patch_file_diff(changed_file, stats_by_path) for changed_file in report.files
+        _build_patch_file_diff(changed_file, stats_by_path, mode_by_path)
+        for changed_file in report.files
     )
     patch_sha256 = hashlib.sha256(patch_bytes).hexdigest()
 
@@ -223,6 +233,85 @@ def parse_git_numstat(raw_output: bytes) -> dict[str, _LineStats]:
         )
 
     return stats_by_path
+
+
+def parse_git_patch_modes(raw_patch: bytes) -> dict[str, _PatchModeMetadata]:
+    """Parse mode metadata from Git patch headers.
+
+    Git represents symlinks with mode 120000. This parser preserves that patch
+    metadata so later safety gates can block unsafe symlink changes before any
+    approval or apply step.
+    """
+
+    if not raw_patch:
+        return {}
+
+    modes_by_path: dict[str, _PatchModeMetadata] = {}
+    current_path: str | None = None
+    old_mode: str | None = None
+    new_mode: str | None = None
+
+    def flush_current_file() -> None:
+        nonlocal current_path, old_mode, new_mode
+
+        if current_path is None:
+            return
+
+        if old_mode is None and new_mode is None:
+            return
+
+        modes_by_path[current_path] = _PatchModeMetadata(
+            old_mode=old_mode,
+            new_mode=new_mode,
+            mode_changed=bool(old_mode and new_mode and old_mode != new_mode),
+        )
+
+    for line in _decode_git_output(raw_patch).splitlines():
+        if line.startswith("diff --git "):
+            flush_current_file()
+            _old_path, new_path = _parse_diff_git_paths(line)
+            current_path = new_path
+            old_mode = None
+            new_mode = None
+            continue
+
+        if current_path is None:
+            continue
+
+        if line.startswith("new file mode "):
+            new_mode = line.removeprefix("new file mode ").strip()
+        elif line.startswith("deleted file mode "):
+            old_mode = line.removeprefix("deleted file mode ").strip()
+        elif line.startswith("old mode "):
+            old_mode = line.removeprefix("old mode ").strip()
+        elif line.startswith("new mode "):
+            new_mode = line.removeprefix("new mode ").strip()
+
+    flush_current_file()
+
+    return modes_by_path
+
+
+def _parse_diff_git_paths(line: str) -> tuple[str | None, str | None]:
+    try:
+        parts = shlex.split(line)
+    except ValueError as exc:
+        raise PatchDiffGenerationError(f"Invalid Git patch header: {line!r}") from exc
+
+    if len(parts) < 4:
+        raise PatchDiffGenerationError(f"Invalid Git patch header: {line!r}")
+
+    return _strip_git_patch_prefix(parts[2]), _strip_git_patch_prefix(parts[3])
+
+
+def _strip_git_patch_prefix(path: str) -> str | None:
+    if path == "/dev/null":
+        return None
+
+    if path.startswith("a/") or path.startswith("b/"):
+        path = path[2:]
+
+    return normalize_repo_relative_path(path)
 
 
 def _generate_diff_outputs(
@@ -324,8 +413,17 @@ def _git_index_path(workspace: Path) -> Path:
 def _build_patch_file_diff(
     changed_file: ChangedFile,
     stats_by_path: dict[str, _LineStats],
+    mode_by_path: dict[str, _PatchModeMetadata],
 ) -> PatchFileDiff:
     stats = stats_by_path.get(changed_file.path, _LineStats(0, 0, False))
+    mode_metadata = mode_by_path.get(changed_file.path, _PatchModeMetadata())
+
+    old_mode = changed_file.old_mode or mode_metadata.old_mode
+    new_mode = changed_file.new_mode or mode_metadata.new_mode
+    mode_changed = changed_file.mode_changed or mode_metadata.mode_changed
+
+    if old_mode and new_mode and old_mode != new_mode:
+        mode_changed = True
 
     return PatchFileDiff(
         path=changed_file.path,
@@ -334,9 +432,9 @@ def _build_patch_file_diff(
         additions=stats.additions,
         deletions=stats.deletions,
         binary=stats.binary,
-        old_mode=changed_file.old_mode,
-        new_mode=changed_file.new_mode,
-        mode_changed=changed_file.mode_changed,
+        old_mode=old_mode,
+        new_mode=new_mode,
+        mode_changed=mode_changed,
     )
 
 
@@ -389,4 +487,5 @@ __all__ = [
     "generate_patch_diff",
     "generate_patch_diff_from_report",
     "parse_git_numstat",
+    "parse_git_patch_modes",
 ]

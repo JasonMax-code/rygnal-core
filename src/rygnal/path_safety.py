@@ -35,11 +35,25 @@ class PathSafetyViolation:
 
 
 @dataclass(frozen=True)
+class SymlinkTarget:
+    path: str
+    target: str
+
+    @cached_property
+    def audit_summary(self) -> dict[str, object]:
+        return {
+            "path": self.path,
+            "target": self.target,
+        }
+
+
+@dataclass(frozen=True)
 class PatchPathSafetyReport:
     patch_sha256: str
     baseline_commit_sha: str
     target_repo_path: str | None
     checked_paths: tuple[str, ...]
+    symlink_targets: tuple[SymlinkTarget, ...] = ()
     violations: tuple[PathSafetyViolation, ...] = ()
 
     @cached_property
@@ -54,6 +68,9 @@ class PatchPathSafetyReport:
             "baseline_commit_sha": self.baseline_commit_sha,
             "target_repo_path": self.target_repo_path,
             "checked_paths": self.checked_paths,
+            "symlink_targets": tuple(
+                symlink_target.audit_summary for symlink_target in self.symlink_targets
+            ),
             "violations": tuple(violation.audit_summary for violation in self.violations),
         }
 
@@ -134,11 +151,20 @@ def _validate_patch_paths(
 ) -> PatchPathSafetyReport:
     metadata_paths = _metadata_paths(patch_diff)
     patch_paths = _patch_paths_from_text(patch_diff.patch)
+    symlink_targets = _symlink_targets_from_patch(patch_diff)
     all_paths = tuple(sorted(metadata_paths | patch_paths))
     violations: list[PathSafetyViolation] = []
 
     for path in all_paths:
         violations.extend(_path_violations(path, target_repo_path=target_repo_path))
+
+    for symlink_target in symlink_targets:
+        violations.extend(
+            _symlink_target_violations(
+                symlink_target,
+                target_repo_path=target_repo_path,
+            )
+        )
 
     for path in sorted(patch_paths - metadata_paths):
         violations.append(
@@ -154,6 +180,7 @@ def _validate_patch_paths(
         baseline_commit_sha=patch_diff.baseline_commit_sha,
         target_repo_path=target_repo_path.as_posix() if target_repo_path else None,
         checked_paths=all_paths,
+        symlink_targets=symlink_targets,
         violations=tuple(_dedupe_violations(violations)),
     )
 
@@ -191,6 +218,140 @@ def _patch_paths_from_text(patch: str) -> set[str]:
             paths.add(line.removeprefix("rename to ").strip())
 
     return paths
+
+
+def _symlink_targets_from_patch(patch_diff: PatchDiff) -> tuple[SymlinkTarget, ...]:
+    added_lines = _added_lines_by_path(patch_diff.patch)
+    targets: list[SymlinkTarget] = []
+
+    for file_diff in patch_diff.files:
+        if file_diff.new_mode != "120000":
+            continue
+
+        lines = added_lines.get(file_diff.path, ())
+        if len(lines) != 1:
+            targets.append(SymlinkTarget(path=file_diff.path, target=""))
+            continue
+
+        targets.append(SymlinkTarget(path=file_diff.path, target=lines[0]))
+
+    return tuple(targets)
+
+
+def _added_lines_by_path(patch: str) -> dict[str, tuple[str, ...]]:
+    added_lines: dict[str, list[str]] = {}
+    current_path: str | None = None
+
+    for line in patch.splitlines():
+        if line.startswith("diff --git "):
+            current_path = None
+            continue
+
+        if line.startswith("+++ "):
+            current_path = _path_from_file_header(line)
+            if current_path is not None:
+                added_lines.setdefault(current_path, [])
+            continue
+
+        if current_path is None:
+            continue
+
+        if line.startswith("+") and not line.startswith("+++"):
+            added_lines[current_path].append(line[1:])
+
+    return {path: tuple(lines) for path, lines in added_lines.items()}
+
+
+def _symlink_target_violations(
+    symlink_target: SymlinkTarget,
+    *,
+    target_repo_path: Path | None,
+) -> tuple[PathSafetyViolation, ...]:
+    violations: list[PathSafetyViolation] = []
+    target = symlink_target.target.strip()
+
+    if not target:
+        return (
+            PathSafetyViolation(
+                code="symlink-target-missing",
+                path=symlink_target.path,
+                reason="Symlink target could not be determined from the patch.",
+            ),
+        )
+
+    if "\0" in target:
+        violations.append(
+            PathSafetyViolation(
+                code="symlink-target-null-byte",
+                path=symlink_target.path,
+                reason="Symlink target must not contain null bytes.",
+            )
+        )
+
+    if target.startswith(("/", "\\", "//", "\\\\")):
+        violations.append(
+            PathSafetyViolation(
+                code="symlink-target-rooted",
+                path=symlink_target.path,
+                reason="Symlink target must be repository-relative.",
+            )
+        )
+
+    windows_target = PureWindowsPath(target)
+    if windows_target.drive or windows_target.is_absolute():
+        violations.append(
+            PathSafetyViolation(
+                code="symlink-target-windows-rooted",
+                path=symlink_target.path,
+                reason="Symlink target must not use a Windows drive or UNC root.",
+            )
+        )
+
+    normalized_target = target.replace("\\", "/")
+    escaped = _relative_target_escapes_repo(symlink_target.path, normalized_target)
+    if escaped:
+        violations.append(
+            PathSafetyViolation(
+                code="symlink-target-outside-repo",
+                path=symlink_target.path,
+                reason="Symlink target escapes the trusted repository boundary.",
+            )
+        )
+
+    if target_repo_path is not None and not escaped and not violations:
+        root = target_repo_path.resolve(strict=False)
+        link_parent = PurePosixPath(symlink_target.path).parent.as_posix()
+        candidate = (root / link_parent / normalized_target).resolve(strict=False)
+
+        if not _is_within_directory(candidate, root):
+            violations.append(
+                PathSafetyViolation(
+                    code="symlink-target-outside-repo",
+                    path=symlink_target.path,
+                    reason="Symlink target resolves outside the trusted repository boundary.",
+                )
+            )
+
+    return tuple(violations)
+
+
+def _relative_target_escapes_repo(link_path: str, target: str) -> bool:
+    link_parent = PurePosixPath(link_path).parent
+    parts: list[str] = []
+
+    for part in (*link_parent.parts, *PurePosixPath(target).parts):
+        if part in {"", "."}:
+            continue
+
+        if part == "..":
+            if not parts:
+                return True
+            parts.pop()
+            continue
+
+        parts.append(part)
+
+    return False
 
 
 def _paths_from_diff_git_header(line: str) -> set[str]:
@@ -350,6 +511,7 @@ def _dedupe_violations(
 
 __all__ = [
     "PatchPathSafetyReport",
+    "SymlinkTarget",
     "PathSafetyError",
     "PathSafetyViolation",
     "ensure_patch_path_forms_safe",

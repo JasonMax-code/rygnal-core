@@ -218,6 +218,15 @@ def _auto_apply_skip_reasons(
             )
         )
 
+    for report_reason in risk_report.report_reasons:
+        if report_reason.code.startswith(("large-diff-", "hard-diff-")):
+            reasons.append(
+                SafePatchSkipReason(
+                    code=report_reason.code,
+                    reason=report_reason.reason,
+                )
+            )
+
     for file_risk in risk_report.files:
         if not _is_docs_or_tests_only(file_risk):
             reasons.append(

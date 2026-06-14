@@ -16,6 +16,12 @@ from functools import cached_property
 from pathlib import PurePosixPath
 
 from rygnal.changed_files import ChangedFileKind, normalize_repo_relative_path
+from rygnal.diff_limits import (
+    DEFAULT_DIFF_LIMIT_POLICY,
+    DiffLimitPolicy,
+    DiffLimitReason,
+    evaluate_diff_limits,
+)
 from rygnal.patch_diff import PatchDiff, PatchFileDiff
 from rygnal.risk_engine import RiskLevel
 
@@ -334,6 +340,7 @@ def classify_patch_risk(
     patch_diff: PatchDiff,
     *,
     validation_reasons: Iterable[ChangeRiskReason] = (),
+    diff_limit_policy: DiffLimitPolicy = DEFAULT_DIFF_LIMIT_POLICY,
 ) -> ChangeRiskReport:
     """Classify each changed file in a guarded workspace patch."""
 
@@ -342,7 +349,14 @@ def classify_patch_risk(
         classify_patch_file_risk(file_diff, added_lines_by_path=added_lines_by_path)
         for file_diff in patch_diff.files
     )
-    report_reasons = tuple(validation_reasons)
+    diff_limit_reasons = tuple(
+        _from_diff_limit_reason(reason)
+        for reason in evaluate_diff_limits(
+            patch_diff,
+            policy=diff_limit_policy,
+        ).reasons
+    )
+    report_reasons = (*tuple(validation_reasons), *diff_limit_reasons)
 
     return ChangeRiskReport(
         baseline_commit_sha=patch_diff.baseline_commit_sha,
@@ -615,6 +629,15 @@ def _parse_new_patch_path(raw_path: str) -> str | None:
 
     path = raw_path[2:] if raw_path.startswith("b/") else raw_path
     return normalize_repo_relative_path(path)
+
+
+def _from_diff_limit_reason(reason: DiffLimitReason) -> ChangeRiskReason:
+    return _reason(
+        reason.code,
+        reason.risk_level,
+        reason.reason,
+        dict(reason.evidence),
+    )
 
 
 def _reason(

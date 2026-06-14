@@ -293,6 +293,16 @@ def _approval_reasons(
             )
         )
 
+    for report_reason in risk_report.report_reasons:
+        if report_reason.risk_level in {RiskLevel.MEDIUM, RiskLevel.HIGH, RiskLevel.CRITICAL}:
+            reasons.append(
+                PatchApprovalReason(
+                    code=report_reason.code,
+                    reason=report_reason.reason,
+                    risk_level=report_reason.risk_level,
+                )
+            )
+
     for file_risk in risk_report.files:
         reasons.extend(_file_approval_reasons(file_risk))
 

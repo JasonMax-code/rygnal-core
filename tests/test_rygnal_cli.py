@@ -23,6 +23,7 @@ def test_rygnal_cli_help_works():
     assert result.returncode == 0
     assert "Rygnal Core CLI" in result.stdout
     assert "version" in result.stdout
+    assert "run" in result.stdout
     assert "demo" in result.stdout
     assert "policy" in result.stdout
 

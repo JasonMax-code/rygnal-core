@@ -230,3 +230,30 @@ index 0000000..1111111 100644
     added_lines = extract_added_lines_by_path(patch)
 
     assert added_lines == {"app.py": ("new", 'token = "abc123456789"')}
+
+
+def test_common_credential_paths_are_critical(tmp_path: Path) -> None:
+    repo = create_repo(tmp_path)
+    sensitive_paths = (
+        ".aws/credentials",
+        ".ssh/id_rsa",
+        ".config/gcloud/application_default_credentials.json",
+        ".docker/config.json",
+        ".netrc",
+    )
+
+    for sensitive_path in sensitive_paths:
+        target = repo / sensitive_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("fake credential material\n", encoding="utf-8")
+
+    report = classify_repo_changes(repo)
+    risks_by_path = {file.path: file for file in report.files}
+
+    for sensitive_path in sensitive_paths:
+        assert sensitive_path in risks_by_path
+        assert risks_by_path[sensitive_path].risk_level == RiskLevel.CRITICAL
+        assert any(
+            reason.code == "security-sensitive-path"
+            for reason in risks_by_path[sensitive_path].reasons
+        )

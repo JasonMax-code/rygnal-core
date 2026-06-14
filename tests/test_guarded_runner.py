@@ -190,6 +190,41 @@ def test_non_positive_timeout_is_blocked(tmp_path: Path) -> None:
     assert "Timeout" in result.blocked_reason
 
 
+def test_missing_trusted_repo_path_is_blocked(tmp_path: Path) -> None:
+    missing_repo = tmp_path / "missing"
+
+    result = run_guarded(
+        GuardedRunConfig(
+            trusted_repo_path=missing_repo,
+            command=py_command("print('should not run')"),
+            rygnal_run_root=tmp_path / "runs",
+            unsafe_local_requested=True,
+        )
+    )
+
+    assert result.status == GuardedRunStatus.BLOCKED
+    assert result.workspace_path is None
+    assert "does not exist" in result.blocked_reason
+
+
+def test_non_git_trusted_repo_path_is_blocked(tmp_path: Path) -> None:
+    not_git = tmp_path / "not-git"
+    not_git.mkdir()
+
+    result = run_guarded(
+        GuardedRunConfig(
+            trusted_repo_path=not_git,
+            command=py_command("print('should not run')"),
+            rygnal_run_root=tmp_path / "runs",
+            unsafe_local_requested=True,
+        )
+    )
+
+    assert result.status == GuardedRunStatus.BLOCKED
+    assert result.workspace_path is None
+    assert result.command_result is None
+
+
 def test_dirty_trusted_repo_is_blocked_by_default(tmp_path: Path) -> None:
     repo = create_repo(tmp_path / "repo")
     (repo / "README.md").write_text("dirty\n", encoding="utf-8")

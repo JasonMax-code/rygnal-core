@@ -184,6 +184,8 @@ def run_guarded(config: GuardedRunConfig) -> GuardedRunResult:
     try:
         command = _validate_command(config.command)
         _validate_timeout(config.timeout_seconds)
+        trusted_repo_input = _validate_trusted_repo_path(config.trusted_repo_path)
+        trusted_repo_label = trusted_repo_input.as_posix()
     except ValueError as exc:
         return _blocked_result(
             config=config,
@@ -210,13 +212,13 @@ def run_guarded(config: GuardedRunConfig) -> GuardedRunResult:
     )
 
     try:
-        trusted_repo = detect_trusted_repo_root(config.trusted_repo_path)
+        trusted_repo = detect_trusted_repo_root(trusted_repo_input)
         _verify_trusted_repo_state(
             trusted_repo,
             allow_dirty_override=config.allow_dirty_override,
             warnings=warnings,
         )
-    except (GuardedWorktreeError, DirtyRepositoryError, RuntimeError) as exc:
+    except (GuardedWorktreeError, DirtyRepositoryError, RuntimeError, OSError) as exc:
         return _blocked_result(
             config=config,
             trace_id=trace_id,
@@ -622,6 +624,18 @@ def _validate_command(command: object) -> tuple[str, ...]:
         raise ValueError("Command items must not be empty strings.")
 
     return command_tuple
+
+
+def _validate_trusted_repo_path(trusted_repo_path: Path) -> Path:
+    trusted_path = Path(trusted_repo_path).expanduser()
+
+    if not trusted_path.exists():
+        raise ValueError(f"Trusted repository path does not exist: {trusted_path}")
+
+    if not trusted_path.is_dir():
+        raise ValueError(f"Trusted repository path is not a directory: {trusted_path}")
+
+    return trusted_path.resolve()
 
 
 def _validate_timeout(timeout_seconds: int) -> None:

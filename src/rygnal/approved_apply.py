@@ -27,6 +27,11 @@ from rygnal.patch_approval import (
     evaluate_patch_approval_requirement,
 )
 from rygnal.patch_diff import PatchDiff
+from rygnal.path_safety import (
+    PathSafetyError,
+    ensure_patch_paths_safe,
+    write_path_safety_audit_event,
+)
 
 
 class ApprovedPatchApplyError(RuntimeError):
@@ -78,6 +83,23 @@ def apply_approved_patch(
     risk_report: ChangeRiskReport | None = None,
     logger: AuditLogger | None = None,
 ) -> ApprovedPatchApplyResult:
+    target_repo = Path(target_repo_path).resolve()
+    _ensure_git_repo_root(target_repo)
+
+    try:
+        ensure_patch_paths_safe(patch_diff, target_repo)
+    except PathSafetyError as exc:
+        if logger is not None:
+            write_path_safety_audit_event(
+                logger,
+                exc.report,
+                user_id=approval_request.requested_by,
+                agent_id=approval_request.agent_id,
+                environment=approval_request.environment,
+                trace_id=approval_request.trace_id,
+            )
+        raise ApprovedPatchApplyError(str(exc)) from exc
+
     report = risk_report or classify_patch_risk(patch_diff)
     gate = evaluate_guarded_change_gate(patch_diff, risk_report=report)
 
@@ -100,9 +122,6 @@ def apply_approved_patch(
         raise ApprovedPatchApplyError(str(exc)) from exc
 
     _validate_request_for_apply(approval_request)
-
-    target_repo = Path(target_repo_path).resolve()
-    _ensure_git_repo_root(target_repo)
     _ensure_clean_repo(target_repo)
     _ensure_target_at_baseline(target_repo, patch_diff.baseline_commit_sha)
     _check_patch_applies(target_repo, patch_diff.patch)

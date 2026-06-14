@@ -21,6 +21,7 @@ from rygnal.models import (
     utc_now_iso,
 )
 from rygnal.patch_diff import PatchDiff
+from rygnal.path_safety import PathSafetyError, ensure_patch_path_forms_safe
 from rygnal.risk_engine import RiskLevel
 from rygnal.security import redact_sensitive_value
 
@@ -114,6 +115,11 @@ def create_patch_approval_request(
     gate_decision: GuardedChangeGateDecision | None = None,
     trace_id: str | None = None,
 ) -> ApprovalRequest:
+    try:
+        ensure_patch_path_forms_safe(patch_diff)
+    except PathSafetyError as exc:
+        raise PatchApprovalError(str(exc)) from exc
+
     requirement = evaluate_patch_approval_requirement(
         patch_diff,
         risk_report=risk_report,

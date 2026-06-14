@@ -18,6 +18,11 @@ from rygnal.change_gate import (
 from rygnal.change_risk import ChangeRiskReport, FileRiskClassification, classify_patch_risk
 from rygnal.models import Decision, PolicyDecision, Severity, ToolRequest, new_trace_id
 from rygnal.patch_diff import PatchDiff
+from rygnal.path_safety import (
+    PathSafetyError,
+    ensure_patch_paths_safe,
+    write_path_safety_audit_event,
+)
 from rygnal.risk_engine import RiskLevel
 
 
@@ -87,12 +92,27 @@ def auto_apply_safe_patch(
     environment: str = "local",
     trace_id: str | None = None,
 ) -> SafePatchApplyResult:
-    report = risk_report or classify_patch_risk(patch_diff)
-    gate = gate_decision or evaluate_guarded_change_gate(patch_diff, risk_report=report)
     target_repo = Path(target_repo_path).resolve()
 
     _ensure_git_repo(target_repo)
+    try:
+        ensure_patch_paths_safe(patch_diff, target_repo)
+    except PathSafetyError as exc:
+        if logger is not None:
+            write_path_safety_audit_event(
+                logger,
+                exc.report,
+                user_id=user_id,
+                agent_id=agent_id,
+                environment=environment,
+                trace_id=trace_id,
+            )
+        raise SafePatchApplyError(str(exc)) from exc
+
     _ensure_clean_repo(target_repo)
+
+    report = risk_report or classify_patch_risk(patch_diff)
+    gate = gate_decision or evaluate_guarded_change_gate(patch_diff, risk_report=report)
 
     skip_reasons = _auto_apply_skip_reasons(patch_diff, report, gate)
     result = _result(

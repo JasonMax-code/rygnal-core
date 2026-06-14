@@ -15,6 +15,14 @@ from enum import StrEnum
 from functools import cached_property
 from pathlib import Path, PurePosixPath
 
+from rygnal.ignore_rules import (
+    DEFAULT_GUARDED_IGNORE_RULES,
+    DEFAULT_HEAVY_PATH_SEGMENTS,
+    GuardedIgnoreReason,
+    GuardedIgnoreRules,
+    build_guarded_ignore_rules,
+)
+
 BASELINE_SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{40}$")
 
 
@@ -35,8 +43,7 @@ class ChangedFileKind(StrEnum):
     UNTRACKED = "untracked"
 
 
-class IgnoredFileReason(StrEnum):
-    GENERATED_OR_HEAVY_PATH = "generated_or_heavy_path"
+IgnoredFileReason = GuardedIgnoreReason
 
 
 @dataclass(frozen=True)
@@ -96,30 +103,15 @@ class ChangedFileReport:
         }
 
 
-DEFAULT_GENERATED_PATH_SEGMENTS = frozenset(
-    {
-        ".coverage",
-        ".mypy_cache",
-        ".next",
-        ".pytest_cache",
-        ".ruff_cache",
-        ".venv",
-        "__pycache__",
-        "build",
-        "coverage",
-        "dist",
-        "node_modules",
-        "target",
-        "venv",
-    }
-)
+DEFAULT_GENERATED_PATH_SEGMENTS = DEFAULT_HEAVY_PATH_SEGMENTS
 
 
 def detect_changed_files(
     workspace_path: str | Path,
     baseline_commit_sha: str,
     *,
-    generated_path_segments: Iterable[str] = DEFAULT_GENERATED_PATH_SEGMENTS,
+    ignore_rules: GuardedIgnoreRules | None = None,
+    generated_path_segments: Iterable[str] | None = None,
 ) -> ChangedFileReport:
     """Detect changed files inside a guarded worktree.
 
@@ -143,14 +135,19 @@ def detect_changed_files(
         cwd=workspace,
     )
 
-    tracked_files = parse_git_raw_diff(raw_diff)
-    untracked_files, ignored_files = _classify_untracked_files(
-        untracked_output,
+    rules = _resolve_ignore_rules(
+        ignore_rules=ignore_rules,
         generated_path_segments=generated_path_segments,
     )
 
+    tracked_files = parse_git_raw_diff(raw_diff)
+    untracked_files, ignored_untracked_files = _classify_untracked_files(
+        untracked_output,
+        ignore_rules=rules,
+    )
+
     files = tuple(sorted((*tracked_files, *untracked_files), key=_changed_file_sort_key))
-    ignored = tuple(sorted(ignored_files, key=lambda item: item.path))
+    ignored = tuple(sorted(ignored_untracked_files, key=lambda item: item.path))
 
     return ChangedFileReport(
         workspace_path=workspace.as_posix(),
@@ -257,20 +254,35 @@ def normalize_repo_relative_path(path: str) -> str:
     return PurePosixPath(*clean_parts).as_posix()
 
 
-def is_generated_or_heavy_path(
-    path: str,
+def is_generated_or_heavy_path(path: str) -> bool:
+    return DEFAULT_GUARDED_IGNORE_RULES.is_heavy_or_generated_path(path)
+
+
+def is_protected_visible_path(path: str) -> bool:
+    return DEFAULT_GUARDED_IGNORE_RULES.is_protected_visible_path(path)
+
+
+def _resolve_ignore_rules(
     *,
-    generated_path_segments: Iterable[str] = DEFAULT_GENERATED_PATH_SEGMENTS,
-) -> bool:
-    normalized = normalize_repo_relative_path(path)
-    ignored_segments = {segment.lower() for segment in generated_path_segments}
-    return any(part.lower() in ignored_segments for part in PurePosixPath(normalized).parts)
+    ignore_rules: GuardedIgnoreRules | None,
+    generated_path_segments: Iterable[str] | None,
+) -> GuardedIgnoreRules:
+    if ignore_rules is not None and generated_path_segments is not None:
+        raise TypeError("Use either ignore_rules or generated_path_segments, not both.")
+
+    if ignore_rules is not None:
+        return ignore_rules
+
+    if generated_path_segments is not None:
+        return build_guarded_ignore_rules(heavy_path_segments=generated_path_segments)
+
+    return DEFAULT_GUARDED_IGNORE_RULES
 
 
 def _classify_untracked_files(
     raw_output: bytes,
     *,
-    generated_path_segments: Iterable[str],
+    ignore_rules: GuardedIgnoreRules,
 ) -> tuple[tuple[ChangedFile, ...], tuple[IgnoredChangedFile, ...]]:
     if not raw_output:
         return (), ()
@@ -284,19 +296,17 @@ def _classify_untracked_files(
 
         path = normalize_repo_relative_path(_decode_git_field(field))
 
-        if is_generated_or_heavy_path(
-            path,
-            generated_path_segments=generated_path_segments,
-        ):
+        decision = ignore_rules.decide_untracked_path(path)
+        if decision.ignored:
             ignored_files.append(
                 IgnoredChangedFile(
-                    path=path,
-                    reason=IgnoredFileReason.GENERATED_OR_HEAVY_PATH,
+                    path=decision.path,
+                    reason=decision.reason or IgnoredFileReason.GENERATED_OR_HEAVY_PATH,
                 )
             )
             continue
 
-        changed_files.append(ChangedFile(path=path, kind=ChangedFileKind.UNTRACKED))
+        changed_files.append(ChangedFile(path=decision.path, kind=ChangedFileKind.UNTRACKED))
 
     return tuple(changed_files), tuple(ignored_files)
 

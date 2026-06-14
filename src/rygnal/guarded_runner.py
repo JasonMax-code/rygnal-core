@@ -1,0 +1,932 @@
+from __future__ import annotations
+
+import hashlib
+import os
+import shutil
+import subprocess  # nosec B404
+import time
+from dataclasses import dataclass
+from enum import StrEnum
+from pathlib import Path, PurePosixPath
+from typing import Protocol
+
+from rygnal.audit_logger import AuditLogger
+from rygnal.changed_files import ChangedFileDetectionError, ChangedFileReport, detect_changed_files
+from rygnal.execution_backend import (
+    ExecutionBackendName,
+    ExecutionBackendSelection,
+    ExecutionBackendSelectionError,
+    detect_host_backend_capabilities,
+    select_execution_backend,
+)
+from rygnal.guarded_worktree import (
+    GuardedWorktree,
+    GuardedWorktreeConfig,
+    GuardedWorktreeError,
+    create_guarded_worktree,
+    detect_trusted_repo_root,
+)
+from rygnal.models import Decision, PolicyDecision, Severity, ToolRequest, new_trace_id
+from rygnal.patch_diff import PatchDiff, PatchDiffGenerationError, generate_patch_diff_from_report
+from rygnal.process_containment import (
+    LifecycleEvent,
+    build_lifecycle_result,
+    evaluate_containment_capabilities,
+)
+from rygnal.repo_state import DirtyRepositoryError, get_uncommitted_changes
+from rygnal.untracked_files import UntrackedFilePolicy
+from rygnal.workspace_cleanup import CleanupResult, CleanupStatus, destroy_worktree
+
+UNSAFE_LOCAL_WARNING = "Unsafe local execution is not a containment backend."
+_SANDBOX_WORKSPACE = PurePosixPath("/").joinpath("workspace")
+_SANDBOX_TMP = PurePosixPath("/").joinpath("tmp")
+_SANDBOX_RUN = PurePosixPath("/").joinpath("run")
+
+
+class GuardedRunStatus(StrEnum):
+    COMPLETED = "completed"
+    FAILED = "failed"
+    TIMED_OUT = "timed_out"
+    BLOCKED = "blocked"
+    CLEANUP_FAILED = "cleanup_failed"
+
+
+class GuardedRunnerError(RuntimeError):
+    """Base exception for guarded runner failures."""
+
+
+class GuardedRunBlockedError(GuardedRunnerError):
+    """Raised internally for safety precondition failures."""
+
+
+class GuardedCommandExecutionError(GuardedRunnerError):
+    """Raised when a backend cannot start or supervise the command."""
+
+
+@dataclass(frozen=True)
+class GuardedRunConfig:
+    trusted_repo_path: Path
+    command: tuple[str, ...]
+    timeout_seconds: int = 300
+    rygnal_run_root: Path = Path("/tmp/rygnal-runs")  # nosec B108
+    allow_dirty_override: bool = False
+    untracked_policy: UntrackedFilePolicy = UntrackedFilePolicy.BLOCK
+    preserve_workspace: bool = False
+    unsafe_local_requested: bool = False
+    environment: str = "local"
+    user_id: str = "local_user"
+    agent_id: str = "local_agent"
+    trace_id: str | None = None
+    audit_logger: AuditLogger | None = None
+
+
+@dataclass(frozen=True)
+class GuardedCommandResult:
+    command: tuple[str, ...]
+    exit_code: int | None
+    stdout: str
+    stderr: str
+    timed_out: bool
+    duration_ms: int
+
+
+@dataclass(frozen=True)
+class GuardedRunResult:
+    status: GuardedRunStatus
+    run_id: str | None
+    trusted_repo_path: str
+    workspace_path: str | None
+    baseline_commit_sha: str | None
+
+    backend_name: str | None
+    backend_safe_by_default: bool
+    containment_verified: bool
+
+    cleanup_performed: bool
+    cleanup_status: str | None
+
+    command_result: GuardedCommandResult | None
+    changed_file_report: ChangedFileReport | None
+    patch_diff: PatchDiff | None
+
+    blocked_reason: str | None
+    warnings: tuple[str, ...]
+
+
+class CommandBackend(Protocol):
+    def run(
+        self,
+        command: tuple[str, ...],
+        cwd: Path,
+        timeout_seconds: int,
+    ) -> GuardedCommandResult: ...
+
+
+@dataclass(frozen=True)
+class UnsafeLocalCommandBackend:
+    """Explicit developer/test backend.
+
+    This backend is intentionally not a containment boundary. It still runs the
+    command inside the guarded worktree, never inside the trusted repository.
+    """
+
+    def run(
+        self,
+        command: tuple[str, ...],
+        cwd: Path,
+        timeout_seconds: int,
+    ) -> GuardedCommandResult:
+        return _run_subprocess(
+            command,
+            cwd=cwd,
+            timeout_seconds=timeout_seconds,
+        )
+
+
+@dataclass(frozen=True)
+class BubblewrapCommandBackend:
+    """Conservative Bubblewrap command backend."""
+
+    def run(
+        self,
+        command: tuple[str, ...],
+        cwd: Path,
+        timeout_seconds: int,
+    ) -> GuardedCommandResult:
+        bwrap_command = _build_bubblewrap_command(command, cwd)
+        return _run_subprocess(
+            tuple(bwrap_command),
+            cwd=cwd,
+            timeout_seconds=timeout_seconds,
+        )
+
+
+@dataclass(frozen=True)
+class UnsupportedCommandBackend:
+    reason: str
+
+    def run(
+        self,
+        command: tuple[str, ...],
+        cwd: Path,
+        timeout_seconds: int,
+    ) -> GuardedCommandResult:
+        raise GuardedCommandExecutionError(self.reason)
+
+
+def run_guarded(config: GuardedRunConfig) -> GuardedRunResult:
+    """Run a command inside a disposable guarded workspace."""
+
+    trace_id = config.trace_id or new_trace_id()
+    warnings: list[str] = []
+    trusted_repo_label = str(config.trusted_repo_path)
+
+    try:
+        command = _validate_command(config.command)
+        _validate_timeout(config.timeout_seconds)
+    except ValueError as exc:
+        return _blocked_result(
+            config=config,
+            trace_id=trace_id,
+            trusted_repo_path=trusted_repo_label,
+            reason=str(exc),
+            warnings=warnings,
+        )
+
+    _audit(
+        config,
+        trace_id=trace_id,
+        event_type="guarded_run.requested",
+        decision=Decision.ALLOW,
+        allowed=True,
+        severity=Severity.LOW,
+        reason="Guarded run requested.",
+        metadata={
+            "command": _command_audit_summary(command),
+            "timeout_seconds": config.timeout_seconds,
+            "preserve_workspace": config.preserve_workspace,
+            "unsafe_local_requested": config.unsafe_local_requested,
+        },
+    )
+
+    try:
+        trusted_repo = detect_trusted_repo_root(config.trusted_repo_path)
+        _verify_trusted_repo_state(
+            trusted_repo,
+            allow_dirty_override=config.allow_dirty_override,
+            warnings=warnings,
+        )
+    except (GuardedWorktreeError, DirtyRepositoryError, RuntimeError) as exc:
+        return _blocked_result(
+            config=config,
+            trace_id=trace_id,
+            trusted_repo_path=trusted_repo_label,
+            reason=str(exc),
+            warnings=warnings,
+        )
+
+    backend_selection: ExecutionBackendSelection | None = None
+    backend_name: str | None = None
+    backend_safe_by_default = False
+    containment_verified = False
+
+    try:
+        backend_selection = _select_backend(config)
+        backend_name = backend_selection.name.value
+        backend_safe_by_default = backend_selection.safe_by_default
+
+        containment = evaluate_containment_capabilities(backend_selection.name)
+        containment_result = build_lifecycle_result(containment, LifecycleEvent.STARTED)
+        containment_verified = containment_result.containment_verified
+
+        if backend_selection.warning:
+            warnings.append(backend_selection.warning)
+
+        warnings.extend(containment.limitations)
+
+        if containment.unsafe_local:
+            warnings.append(UNSAFE_LOCAL_WARNING)
+
+        if containment.unsafe_local and not config.unsafe_local_requested:
+            return _blocked_result(
+                config=config,
+                trace_id=trace_id,
+                trusted_repo_path=trusted_repo.as_posix(),
+                reason="Unsafe local execution was not explicitly requested.",
+                warnings=warnings,
+                backend_name=backend_name,
+                backend_safe_by_default=backend_safe_by_default,
+                containment_verified=containment_verified,
+            )
+
+        if not containment_verified and not containment.unsafe_local:
+            return _blocked_result(
+                config=config,
+                trace_id=trace_id,
+                trusted_repo_path=trusted_repo.as_posix(),
+                reason="Selected backend does not provide verified containment.",
+                warnings=warnings,
+                backend_name=backend_name,
+                backend_safe_by_default=backend_safe_by_default,
+                containment_verified=containment_verified,
+            )
+
+        command_backend = _command_backend_for(backend_selection.name)
+        if isinstance(command_backend, UnsupportedCommandBackend):
+            return _blocked_result(
+                config=config,
+                trace_id=trace_id,
+                trusted_repo_path=trusted_repo.as_posix(),
+                reason=command_backend.reason,
+                warnings=warnings,
+                backend_name=backend_name,
+                backend_safe_by_default=backend_safe_by_default,
+                containment_verified=containment_verified,
+                event_type="guarded_run.backend_blocked",
+            )
+
+        _audit(
+            config,
+            trace_id=trace_id,
+            event_type="guarded_run.backend_selected",
+            decision=Decision.ALLOW,
+            allowed=True,
+            severity=Severity.LOW,
+            reason="Execution backend selected.",
+            metadata={
+                "backend_name": backend_name,
+                "backend_safe_by_default": backend_safe_by_default,
+                "containment_verified": containment_verified,
+                "selection_reason": backend_selection.reason,
+                "warnings": tuple(warnings),
+            },
+        )
+    except ExecutionBackendSelectionError as exc:
+        return _blocked_result(
+            config=config,
+            trace_id=trace_id,
+            trusted_repo_path=trusted_repo.as_posix(),
+            reason=str(exc),
+            warnings=warnings,
+            event_type="guarded_run.backend_blocked",
+        )
+
+    worktree_config = GuardedWorktreeConfig(
+        trusted_repo_path=trusted_repo,
+        rygnal_run_root=config.rygnal_run_root,
+        untracked_policy=config.untracked_policy,
+        audit_logger=config.audit_logger,
+    )
+
+    worktree: GuardedWorktree | None = None
+    command_result: GuardedCommandResult | None = None
+    changed_file_report: ChangedFileReport | None = None
+    patch_diff: PatchDiff | None = None
+    cleanup_result: CleanupResult | None = None
+    cleanup_performed = False
+    blocked_reason: str | None = None
+    status = GuardedRunStatus.FAILED
+
+    try:
+        worktree = create_guarded_worktree(worktree_config)
+    except GuardedWorktreeError as exc:
+        return _blocked_result(
+            config=config,
+            trace_id=trace_id,
+            trusted_repo_path=trusted_repo.as_posix(),
+            reason=str(exc),
+            warnings=warnings,
+            backend_name=backend_name,
+            backend_safe_by_default=backend_safe_by_default,
+            containment_verified=containment_verified,
+            event_type="guarded_run.blocked",
+        )
+
+    try:
+        _audit(
+            config,
+            trace_id=trace_id,
+            event_type="guarded_run.workspace_created",
+            decision=Decision.ALLOW,
+            allowed=True,
+            severity=Severity.LOW,
+            reason="Guarded workspace created.",
+            metadata=_worktree_metadata(worktree, backend_name, containment_verified),
+        )
+
+        _audit(
+            config,
+            trace_id=trace_id,
+            event_type="guarded_run.command_started",
+            decision=Decision.ALLOW,
+            allowed=True,
+            severity=Severity.LOW,
+            reason="Guarded command started.",
+            metadata={
+                **_worktree_metadata(worktree, backend_name, containment_verified),
+                "command": _command_audit_summary(command),
+                "timeout_seconds": config.timeout_seconds,
+            },
+        )
+
+        command_result = command_backend.run(
+            command,
+            cwd=worktree.workspace_path,
+            timeout_seconds=config.timeout_seconds,
+        )
+
+        if command_result.timed_out:
+            status = GuardedRunStatus.TIMED_OUT
+            event_type = "guarded_run.command_timed_out"
+            event_reason = "Guarded command timed out."
+            event_severity = Severity.HIGH
+            event_decision = Decision.BLOCK
+            event_allowed = False
+        elif command_result.exit_code == 0:
+            status = GuardedRunStatus.COMPLETED
+            event_type = "guarded_run.command_completed"
+            event_reason = "Guarded command completed successfully."
+            event_severity = Severity.LOW
+            event_decision = Decision.ALLOW
+            event_allowed = True
+        else:
+            status = GuardedRunStatus.FAILED
+            event_type = "guarded_run.command_failed"
+            event_reason = "Guarded command exited with a non-zero status."
+            event_severity = Severity.MEDIUM
+            event_decision = Decision.BLOCK
+            event_allowed = False
+
+        _audit(
+            config,
+            trace_id=trace_id,
+            event_type=event_type,
+            decision=event_decision,
+            allowed=event_allowed,
+            severity=event_severity,
+            reason=event_reason,
+            metadata={
+                **_worktree_metadata(worktree, backend_name, containment_verified),
+                **_command_metadata(command_result),
+            },
+        )
+
+        changed_file_report = detect_changed_files(
+            worktree.workspace_path,
+            worktree.baseline_commit_sha,
+        )
+
+        _audit(
+            config,
+            trace_id=trace_id,
+            event_type="guarded_run.changed_files_detected",
+            decision=Decision.ALLOW,
+            allowed=True,
+            severity=Severity.LOW,
+            reason="Guarded workspace changed files detected.",
+            metadata={
+                **_worktree_metadata(worktree, backend_name, containment_verified),
+                "changed_file_count": len(changed_file_report.files),
+                "ignored_file_count": len(changed_file_report.ignored_files),
+                "changed_paths": tuple(file.path for file in changed_file_report.files),
+                "ignored_paths": tuple(file.path for file in changed_file_report.ignored_files),
+            },
+        )
+
+        if changed_file_report.files:
+            patch_diff = generate_patch_diff_from_report(changed_file_report)
+
+        _audit(
+            config,
+            trace_id=trace_id,
+            event_type="guarded_run.patch_generated",
+            decision=Decision.ALLOW,
+            allowed=True,
+            severity=Severity.LOW,
+            reason="Guarded workspace patch metadata generated.",
+            metadata={
+                **_worktree_metadata(worktree, backend_name, containment_verified),
+                "patch_generated": patch_diff is not None,
+                "patch": patch_diff.audit_summary if patch_diff is not None else None,
+            },
+        )
+
+    except (GuardedWorktreeError, GuardedCommandExecutionError) as exc:
+        blocked_reason = str(exc)
+        status = GuardedRunStatus.FAILED
+        warnings.append(blocked_reason)
+        _audit(
+            config,
+            trace_id=trace_id,
+            event_type="guarded_run.command_failed",
+            decision=Decision.BLOCK,
+            allowed=False,
+            severity=Severity.HIGH,
+            reason=blocked_reason,
+            metadata={
+                "backend_name": backend_name,
+                "containment_verified": containment_verified,
+                "workspace_path": worktree.workspace_path.as_posix() if worktree else None,
+                "baseline_commit_sha": worktree.baseline_commit_sha if worktree else None,
+            },
+        )
+    except (ChangedFileDetectionError, PatchDiffGenerationError) as exc:
+        blocked_reason = str(exc)
+        status = GuardedRunStatus.FAILED
+        warnings.append(blocked_reason)
+        _audit(
+            config,
+            trace_id=trace_id,
+            event_type="guarded_run.patch_generated",
+            decision=Decision.BLOCK,
+            allowed=False,
+            severity=Severity.HIGH,
+            reason=blocked_reason,
+            metadata={
+                "backend_name": backend_name,
+                "containment_verified": containment_verified,
+                "workspace_path": worktree.workspace_path.as_posix() if worktree else None,
+                "baseline_commit_sha": worktree.baseline_commit_sha if worktree else None,
+            },
+        )
+    finally:
+        if worktree is not None:
+            if config.preserve_workspace:
+                warnings.append("Guarded workspace was preserved by explicit configuration.")
+                cleanup_result = CleanupResult(
+                    status=CleanupStatus.RESET_SUCCESS,
+                    message="Workspace preserved by explicit configuration.",
+                )
+                _audit(
+                    config,
+                    trace_id=trace_id,
+                    event_type="guarded_run.cleanup_completed",
+                    decision=Decision.ALLOW,
+                    allowed=True,
+                    severity=Severity.LOW,
+                    reason="Guarded workspace preserved by explicit configuration.",
+                    metadata={
+                        **_worktree_metadata(worktree, backend_name, containment_verified),
+                        "cleanup_performed": False,
+                        "cleanup_status": "preserved",
+                    },
+                )
+            else:
+                cleanup_performed = True
+                _audit(
+                    config,
+                    trace_id=trace_id,
+                    event_type="guarded_run.cleanup_started",
+                    decision=Decision.ALLOW,
+                    allowed=True,
+                    severity=Severity.LOW,
+                    reason="Guarded workspace cleanup started.",
+                    metadata=_worktree_metadata(worktree, backend_name, containment_verified),
+                )
+
+                cleanup_result = destroy_worktree(worktree, worktree_config)
+
+                if cleanup_result.status == CleanupStatus.CLEANUP_FAILED:
+                    status = GuardedRunStatus.CLEANUP_FAILED
+                    warnings.append(cleanup_result.message)
+                    _audit(
+                        config,
+                        trace_id=trace_id,
+                        event_type="guarded_run.cleanup_failed",
+                        decision=Decision.BLOCK,
+                        allowed=False,
+                        severity=Severity.HIGH,
+                        reason=cleanup_result.message,
+                        metadata={
+                            **_worktree_metadata(worktree, backend_name, containment_verified),
+                            "cleanup_status": cleanup_result.status.value,
+                            "cleanup_message": cleanup_result.message,
+                        },
+                    )
+                else:
+                    _audit(
+                        config,
+                        trace_id=trace_id,
+                        event_type="guarded_run.cleanup_completed",
+                        decision=Decision.ALLOW,
+                        allowed=True,
+                        severity=Severity.LOW,
+                        reason=cleanup_result.message,
+                        metadata={
+                            **_worktree_metadata(worktree, backend_name, containment_verified),
+                            "cleanup_status": cleanup_result.status.value,
+                            "cleanup_message": cleanup_result.message,
+                        },
+                    )
+
+    return GuardedRunResult(
+        status=status,
+        run_id=worktree.run_id if worktree else None,
+        trusted_repo_path=trusted_repo.as_posix(),
+        workspace_path=worktree.workspace_path.as_posix() if worktree else None,
+        baseline_commit_sha=worktree.baseline_commit_sha if worktree else None,
+        backend_name=backend_name,
+        backend_safe_by_default=backend_safe_by_default,
+        containment_verified=containment_verified,
+        cleanup_performed=cleanup_performed,
+        cleanup_status=cleanup_result.status.value if cleanup_result else None,
+        command_result=command_result,
+        changed_file_report=changed_file_report,
+        patch_diff=patch_diff,
+        blocked_reason=blocked_reason,
+        warnings=tuple(warnings),
+    )
+
+
+def _select_backend(config: GuardedRunConfig) -> ExecutionBackendSelection:
+    env = os.environ.copy()
+
+    if config.unsafe_local_requested:
+        env["RYGNAL_UNSAFE_LOCAL"] = "1"
+    else:
+        env.pop("RYGNAL_UNSAFE_LOCAL", None)
+
+    capabilities = detect_host_backend_capabilities(env=env)
+    return select_execution_backend(capabilities)
+
+
+def _command_backend_for(backend_name: ExecutionBackendName) -> CommandBackend:
+    if backend_name == ExecutionBackendName.LINUX_BUBBLEWRAP:
+        return BubblewrapCommandBackend()
+
+    if backend_name == ExecutionBackendName.UNSAFE_LOCAL:
+        return UnsafeLocalCommandBackend()
+
+    return UnsupportedCommandBackend(
+        f"Backend {backend_name.value} was selected but command execution is not "
+        "implemented for the M1 guarded runner."
+    )
+
+
+def _validate_command(command: object) -> tuple[str, ...]:
+    if isinstance(command, str):
+        raise ValueError("Command must be argv-style, not a shell string.")
+
+    try:
+        command_tuple = tuple(command)  # type: ignore[arg-type]
+    except TypeError as exc:
+        raise ValueError("Command must be an argv-style iterable of strings.") from exc
+
+    if not command_tuple:
+        raise ValueError("Command must not be empty.")
+
+    if any(not isinstance(item, str) for item in command_tuple):
+        raise ValueError("Every command item must be a string.")
+
+    if any(item == "" for item in command_tuple):
+        raise ValueError("Command items must not be empty strings.")
+
+    return command_tuple
+
+
+def _validate_timeout(timeout_seconds: int) -> None:
+    if timeout_seconds <= 0:
+        raise ValueError("Timeout must be a positive number of seconds.")
+
+
+def _verify_trusted_repo_state(
+    trusted_repo: Path,
+    *,
+    allow_dirty_override: bool,
+    warnings: list[str],
+) -> None:
+    changes = get_uncommitted_changes(trusted_repo)
+    tracked_dirty = bool(changes.staged or changes.unstaged)
+
+    if not tracked_dirty:
+        return
+
+    if allow_dirty_override:
+        warnings.append("Dirty trusted repository override was explicitly enabled.")
+        return
+
+    lines = ["Tracked uncommitted changes detected in trusted repository:"]
+    if changes.staged:
+        lines.append(f"  Staged: {len(changes.staged)} files")
+    if changes.unstaged:
+        lines.append(f"  Unstaged: {len(changes.unstaged)} files")
+    lines.append("\nRygnal guarded execution blocked to prevent data loss.")
+    lines.append("Commit or stash tracked changes, or pass allow_dirty_override=True.")
+
+    raise DirtyRepositoryError("\n".join(lines))
+
+
+def _run_subprocess(
+    command: tuple[str, ...],
+    *,
+    cwd: Path,
+    timeout_seconds: int,
+) -> GuardedCommandResult:
+    started = time.monotonic()
+
+    try:
+        completed = subprocess.run(  # nosec B603 B607
+            command,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=False,
+            shell=False,
+            timeout=timeout_seconds,
+        )
+        duration_ms = int((time.monotonic() - started) * 1000)
+
+        return GuardedCommandResult(
+            command=command,
+            exit_code=completed.returncode,
+            stdout=completed.stdout or "",
+            stderr=completed.stderr or "",
+            timed_out=False,
+            duration_ms=duration_ms,
+        )
+    except subprocess.TimeoutExpired as exc:
+        duration_ms = int((time.monotonic() - started) * 1000)
+
+        return GuardedCommandResult(
+            command=command,
+            exit_code=None,
+            stdout=_stream_to_text(exc.stdout),
+            stderr=_stream_to_text(exc.stderr),
+            timed_out=True,
+            duration_ms=duration_ms,
+        )
+    except OSError as exc:
+        raise GuardedCommandExecutionError(f"Failed to start guarded command: {exc}") from exc
+
+
+def _build_bubblewrap_command(command: tuple[str, ...], workspace_path: Path) -> list[str]:
+    bwrap_path = shutil.which("bwrap")
+    if bwrap_path is None:
+        raise GuardedCommandExecutionError("Bubblewrap backend selected but bwrap was not found.")
+
+    workspace = workspace_path.resolve()
+
+    args = [
+        bwrap_path,
+        "--unshare-user",
+        "--unshare-pid",
+        "--unshare-net",
+        "--die-with-parent",
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
+        "--tmpfs",
+        _SANDBOX_TMP.as_posix(),
+        "--dir",
+        _SANDBOX_RUN.as_posix(),
+        "--clearenv",
+        "--setenv",
+        "PATH",
+        "/usr/local/bin:/usr/bin:/bin",
+        "--setenv",
+        "HOME",
+        _SANDBOX_TMP.as_posix(),
+        "--setenv",
+        "TMPDIR",
+        _SANDBOX_TMP.as_posix(),
+        "--setenv",
+        "PWD",
+        _SANDBOX_WORKSPACE.as_posix(),
+    ]
+
+    for runtime_path in ("/usr", "/bin", "/lib", "/lib64"):
+        if Path(runtime_path).exists():
+            args.extend(["--ro-bind", runtime_path, runtime_path])
+
+    for runtime_file in (
+        "/etc/passwd",
+        "/etc/group",
+        "/etc/nsswitch.conf",
+        "/etc/ld.so.cache",
+    ):
+        if Path(runtime_file).exists():
+            args.extend(["--ro-bind", runtime_file, runtime_file])
+
+    args.extend(
+        [
+            "--bind",
+            workspace.as_posix(),
+            _SANDBOX_WORKSPACE.as_posix(),
+            "--chdir",
+            _SANDBOX_WORKSPACE.as_posix(),
+            "--",
+            *command,
+        ]
+    )
+
+    return args
+
+
+def _blocked_result(
+    *,
+    config: GuardedRunConfig,
+    trace_id: str,
+    trusted_repo_path: str,
+    reason: str,
+    warnings: list[str],
+    backend_name: str | None = None,
+    backend_safe_by_default: bool = False,
+    containment_verified: bool = False,
+    event_type: str = "guarded_run.blocked",
+) -> GuardedRunResult:
+    _audit(
+        config,
+        trace_id=trace_id,
+        event_type=event_type,
+        decision=Decision.BLOCK,
+        allowed=False,
+        severity=Severity.HIGH,
+        reason=reason,
+        metadata={
+            "backend_name": backend_name,
+            "backend_safe_by_default": backend_safe_by_default,
+            "containment_verified": containment_verified,
+            "blocked_reason": reason,
+            "warnings": tuple(warnings),
+            "command": _command_audit_summary(config.command),
+        },
+    )
+
+    return GuardedRunResult(
+        status=GuardedRunStatus.BLOCKED,
+        run_id=None,
+        trusted_repo_path=trusted_repo_path,
+        workspace_path=None,
+        baseline_commit_sha=None,
+        backend_name=backend_name,
+        backend_safe_by_default=backend_safe_by_default,
+        containment_verified=containment_verified,
+        cleanup_performed=False,
+        cleanup_status=None,
+        command_result=None,
+        changed_file_report=None,
+        patch_diff=None,
+        blocked_reason=reason,
+        warnings=tuple(warnings),
+    )
+
+
+def _audit(
+    config: GuardedRunConfig,
+    *,
+    trace_id: str,
+    event_type: str,
+    decision: Decision,
+    allowed: bool,
+    severity: Severity,
+    reason: str,
+    metadata: dict[str, object],
+) -> None:
+    if config.audit_logger is None:
+        return
+
+    request = ToolRequest(
+        tool_name="guarded_runner",
+        action=event_type,
+        target=str(config.trusted_repo_path),
+        input={"command": _command_audit_summary(config.command)},
+        user_id=config.user_id,
+        agent_id=config.agent_id,
+        environment=config.environment,
+        metadata={"trace_id": trace_id},
+    )
+    policy_decision = PolicyDecision(
+        decision=decision,
+        allowed=allowed,
+        severity=severity,
+        reason=reason,
+        policy_id="guarded-runner",
+    )
+
+    config.audit_logger.log_decision(
+        request,
+        policy_decision,
+        metadata={
+            "event_type": event_type,
+            "trace_id": trace_id,
+            **metadata,
+        },
+    )
+
+
+def _worktree_metadata(
+    worktree: GuardedWorktree,
+    backend_name: str | None,
+    containment_verified: bool,
+) -> dict[str, object]:
+    return {
+        "run_id": worktree.run_id,
+        "trusted_repo_path": worktree.trusted_repo_path.as_posix(),
+        "workspace_path": worktree.workspace_path.as_posix(),
+        "baseline_commit_sha": worktree.baseline_commit_sha,
+        "backend_name": backend_name,
+        "containment_verified": containment_verified,
+    }
+
+
+def _command_metadata(result: GuardedCommandResult) -> dict[str, object]:
+    return {
+        "command": _command_audit_summary(result.command),
+        "exit_code": result.exit_code,
+        "timed_out": result.timed_out,
+        "duration_ms": result.duration_ms,
+        "stdout": _stream_metadata(result.stdout),
+        "stderr": _stream_metadata(result.stderr),
+    }
+
+
+def _stream_metadata(value: str) -> dict[str, object]:
+    encoded = value.encode("utf-8", errors="replace")
+    return {
+        "byte_length": len(encoded),
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+    }
+
+
+def _stream_to_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+
+    return value
+
+
+def _command_audit_summary(command: object) -> dict[str, object]:
+    if isinstance(command, str):
+        command_items = (command,)
+    else:
+        try:
+            command_items = tuple(str(item) for item in command)  # type: ignore[arg-type]
+        except TypeError:
+            command_items = (repr(command),)
+
+    encoded = "\0".join(command_items).encode("utf-8", errors="replace")
+    executable = Path(command_items[0]).name if command_items else None
+
+    return {
+        "argc": len(command_items),
+        "executable": executable,
+        "argv_sha256": hashlib.sha256(encoded).hexdigest(),
+    }
+
+
+__all__ = [
+    "BubblewrapCommandBackend",
+    "CommandBackend",
+    "GuardedCommandResult",
+    "GuardedRunConfig",
+    "GuardedRunResult",
+    "GuardedRunStatus",
+    "GuardedRunnerError",
+    "UnsupportedCommandBackend",
+    "UnsafeLocalCommandBackend",
+    "run_guarded",
+]

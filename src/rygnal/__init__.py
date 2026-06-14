@@ -11,6 +11,13 @@ from rygnal.audit_logger import AuditLogger
 from rygnal.audit_storage import SQLiteAuditStore
 from rygnal.cli_approval import CLIApprovalResolver, build_cli_approval_workflow
 from rygnal.core import Rygnal
+from rygnal.guarded_runner import (
+    GuardedCommandResult,
+    GuardedRunConfig,
+    GuardedRunResult,
+    GuardedRunStatus,
+    run_guarded,
+)
 from rygnal.interceptor import RygnalInterceptor
 from rygnal.models import (
     ApprovalDecision,
@@ -54,6 +61,11 @@ __all__ = [
     "Decision",
     "ExecutionStatus",
     "InterceptorResult",
+    "run_guarded",
+    "GuardedRunStatus",
+    "GuardedRunResult",
+    "GuardedRunConfig",
+    "GuardedCommandResult",
     "PolicyDecision",
     "PolicyExplanation",
     "PolicyEngine",

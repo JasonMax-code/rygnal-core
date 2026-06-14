@@ -16,6 +16,13 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from rygnal.audit_logger import AuditLogger
+from rygnal.untracked_files import (
+    UntrackedFilePolicy,
+    UntrackedFilesError,
+    verify_untracked_files_handled,
+)
+
 
 class GuardedWorktreeError(Exception):
     """Raised when guarded worktree creation or validation fails."""
@@ -27,6 +34,8 @@ class GuardedWorktreeConfig:
 
     trusted_repo_path: Path
     rygnal_run_root: Path = Path("/tmp/rygnal-runs")  # nosec B108
+    untracked_policy: UntrackedFilePolicy = UntrackedFilePolicy.BLOCK
+    audit_logger: AuditLogger | None = None
 
 
 @dataclass(frozen=True)
@@ -93,6 +102,15 @@ def create_guarded_worktree(config: GuardedWorktreeConfig) -> GuardedWorktree:
 
     if is_bare == "true":
         raise GuardedWorktreeError("Bare repositories are not supported for guarded execution.")
+
+    try:
+        verify_untracked_files_handled(
+            repo_root,
+            policy=config.untracked_policy,
+            logger=config.audit_logger,
+        )
+    except UntrackedFilesError as exc:
+        raise GuardedWorktreeError(str(exc)) from exc
 
     baseline_sha = _run_git(["rev-parse", "HEAD"], cwd=repo_root)
     if len(baseline_sha) != 40:

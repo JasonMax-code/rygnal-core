@@ -2,7 +2,6 @@ package engineclient
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -129,7 +128,7 @@ func RunEngine(ctx context.Context, opts EngineOptions, handler EventHandler) (R
 		return terminateProcessTree(cmd)
 	}
 
-	var stderrBuffer bytes.Buffer
+	stderrBuffer := newBoundedBuffer(defaultStderrLimitBytes)
 	if opts.DebugMode {
 		if opts.Stderr != nil {
 			cmd.Stderr = opts.Stderr
@@ -137,7 +136,7 @@ func RunEngine(ctx context.Context, opts EngineOptions, handler EventHandler) (R
 			cmd.Stderr = os.Stderr
 		}
 	} else {
-		cmd.Stderr = &stderrBuffer
+		cmd.Stderr = stderrBuffer
 	}
 
 	stdinPipe, err := cmd.StdinPipe()

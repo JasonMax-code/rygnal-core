@@ -152,7 +152,7 @@ func runExecutionPipeline(
 		Stderr:          cmd.ErrOrStderr(),
 	}
 
-	_, err = deps.runEngine(ctx, engineOpts, func(rawLine string, event engineclient.EngineEvent) error {
+	result, err := deps.runEngine(ctx, engineOpts, func(rawLine string, event engineclient.EngineEvent) error {
 		if opts.jsonMode {
 			fmt.Fprintln(cmd.OutOrStdout(), rawLine)
 			return nil
@@ -164,7 +164,7 @@ func runExecutionPipeline(
 		return err
 	}
 
-	return nil
+	return exitErrorForLastEvent(result.LastEvent)
 }
 
 func renderHumanEngineEvent(cmd *cobra.Command, event engineclient.EngineEvent) error {
@@ -193,7 +193,16 @@ func renderHumanEngineEvent(cmd *cobra.Command, event engineclient.EngineEvent) 
 		}
 	case "workspace.cleaned":
 		fmt.Fprintln(cmd.OutOrStdout(), "Workspace cleaned")
+	case "approval.required":
+		data, err := engineclient.DecodeRunCompletedData(event)
+		if err != nil {
+			return err
+		}
+		renderApprovalRequired(cmd, data)
 	case "run.completed":
+		if event.Status == "approval_required" {
+			return nil
+		}
 		fmt.Fprintf(cmd.OutOrStdout(), "Run completed: status=%s\n", event.Status)
 	case "run.failed":
 		fmt.Fprintf(cmd.ErrOrStderr(), "Run failed: status=%s\n", event.Status)
@@ -208,6 +217,79 @@ func renderHumanEngineEvent(cmd *cobra.Command, event engineclient.EngineEvent) 
 	}
 
 	return nil
+}
+
+func renderApprovalRequired(cmd *cobra.Command, data engineclient.RunCompletedData) {
+	out := cmd.OutOrStdout()
+
+	fmt.Fprintln(out, "Rygnal guarded run")
+	fmt.Fprintln(out)
+	fmt.Fprintf(out, "Status: %s\n", data.Status)
+	fmt.Fprintf(out, "Backend: %s\n", data.Backend.Name)
+	fmt.Fprintf(out, "Containment verified: %s\n", yesNo(data.Backend.ContainmentVerified))
+	fmt.Fprintln(out, "Trusted repo: hidden")
+	fmt.Fprintln(out, "Workspace: hidden")
+	fmt.Fprintf(out, "Baseline: %s\n", shortValue(data.BaselineCommitSHA, 7))
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Approval required")
+	fmt.Fprintf(out, "Reason: %s\n", data.Approval.Reason)
+	fmt.Fprintf(out, "Approval ID: %s\n", data.Approval.ApprovalID)
+	fmt.Fprintf(out, "Patch digest: sha256:%s\n", shortValue(data.Patch.SHA256, 12))
+	fmt.Fprintf(out, "Risk level: %s\n", data.Risk.Level)
+	fmt.Fprintf(out, "Files changed: %d\n", data.Changes.ChangedFileCount)
+
+	if len(data.Risk.Reasons) > 0 {
+		fmt.Fprintln(out, "High-risk reasons:")
+		for _, reason := range data.Risk.Reasons {
+			fmt.Fprintf(out, "  - %s\n", reason)
+		}
+	}
+
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Next steps:")
+	fmt.Fprintln(out, "  1. Review the patch through Rygnal audit/patch inspection.")
+	fmt.Fprintln(out, "  2. Approve only if the patch matches your intent.")
+	fmt.Fprintln(out, "  3. Apply through Rygnal's approved patch flow.")
+	fmt.Fprintln(out, "  4. Do not manually copy changes from the disposable workspace.")
+}
+
+func exitErrorForLastEvent(event *engineclient.EngineEvent) error {
+	if event == nil {
+		return nil
+	}
+
+	switch event.Status {
+	case "completed":
+		return nil
+	case "command_failed":
+		return ExitError{Code: ExitCommandFailed}
+	case "blocked":
+		return ExitError{Code: ExitBlocked}
+	case "approval_required":
+		return ExitError{Code: ExitApprovalRequired}
+	case "timed_out":
+		return ExitError{Code: ExitTimedOut}
+	case "cleanup_failed":
+		return ExitError{Code: ExitCleanupFailed}
+	default:
+		return nil
+	}
+}
+
+func yesNo(value bool) string {
+	if value {
+		return "yes"
+	}
+
+	return "no"
+}
+
+func shortValue(value string, maxLen int) string {
+	if maxLen <= 0 || len(value) <= maxLen {
+		return value
+	}
+
+	return value[:maxLen]
 }
 
 func fieldFromData(data json.RawMessage, key string) string {

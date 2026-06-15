@@ -130,6 +130,66 @@ func TestRunHumanRendersEngineLifecycle(t *testing.T) {
 	}
 }
 
+func TestRunHumanRendersApprovalRequiredAndReturnsExitCode(t *testing.T) {
+	deps := fakeApprovalRequiredRunDependencies(t)
+
+	stdout, stderr, err := executeForTestWithDeps(
+		deps,
+		"run",
+		"--",
+		"python",
+		"agent.py",
+	)
+
+	if err == nil {
+		t.Fatal("expected approval-required exit error")
+	}
+
+	code, ok := ExitCode(err)
+	if !ok {
+		t.Fatalf("expected typed exit error, got %T: %v", err, err)
+	}
+
+	if code != ExitApprovalRequired {
+		t.Fatalf("expected exit code %d, got %d", ExitApprovalRequired, code)
+	}
+
+	if stderr != "" {
+		t.Fatalf("expected empty stderr, got %q", stderr)
+	}
+
+	expectedFragments := []string{
+		"Rygnal guarded run",
+		"Status: approval_required",
+		"Approval required",
+		"Reason: Dependency file changed",
+		"Approval ID: apr_test",
+		"Patch digest: sha256:abc123def456",
+		"Risk level: high",
+		"Files changed: 1",
+		"  - dependency-file-change",
+		"Do not manually copy changes from the disposable workspace.",
+	}
+
+	for _, fragment := range expectedFragments {
+		if !strings.Contains(stdout, fragment) {
+			t.Fatalf("stdout missing %q:\n%s", fragment, stdout)
+		}
+	}
+
+	if strings.Contains(stdout, "Run completed: status=approval_required") {
+		t.Fatalf("approval_required run.completed should not render duplicate generic line:\n%s", stdout)
+	}
+}
+
+func TestExitCodeIgnoresOrdinaryErrors(t *testing.T) {
+	code, ok := ExitCode(errors.New("ordinary failure"))
+
+	if ok {
+		t.Fatalf("ordinary errors must not expose typed exit code, got %d", code)
+	}
+}
+
 func TestRunPropagatesEngineError(t *testing.T) {
 	deps := fakeRunDependencies(t)
 	deps.runEngine = func(
@@ -148,6 +208,80 @@ func TestRunPropagatesEngineError(t *testing.T) {
 
 	if !strings.Contains(err.Error(), "engine bridge failed") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func fakeApprovalRequiredRunDependencies(t *testing.T) runDependencies {
+	t.Helper()
+
+	return runDependencies{
+		resolveGitRoot: func() (string, error) {
+			return "/tmp/trusted-repo", nil
+		},
+		resolveEngineRoot: func() (string, error) {
+			return "/tmp/rygnal-engine-root", nil
+		},
+		newRequestID: func() (string, error) {
+			return "test-request-id", nil
+		},
+		runEngine: func(
+			_ context.Context,
+			_ engineclient.EngineOptions,
+			handler engineclient.EventHandler,
+		) (engineclient.Result, error) {
+			approvalData := []byte(`{
+				"status":"approval_required",
+				"run_id":"run_test",
+				"trusted_repo":{"absolute_path_returned":false,"digest":"repo_digest"},
+				"workspace_path_returned":false,
+				"baseline_commit_sha":"1234567890abcdef",
+				"backend":{"name":"guarded-worktree","safe_by_default":true,"containment_verified":true},
+				"cleanup":{"performed":true,"status":"cleaned"},
+				"command":{"present":true,"exit_code":0,"timed_out":false,"duration_ms":10},
+				"changes":{"changed_file_count":1,"ignored_file_count":0,"files":[{"path":"pyproject.toml","kind":"modified","old_path":"","mode_changed":false}]},
+				"patch":{"generated":true,"sha256":"abc123def4567890","size_bytes":123},
+				"risk":{"present":true,"level":"high","reasons":["dependency-file-change"],"counts":{"high":1}},
+				"blocked_reason":"",
+				"approval":{"required":true,"approval_id":"apr_test","target":"abc123def4567890","policy_id":"patch-risk-gate","severity":"high","reason":"Dependency file changed"},
+				"warnings":[]
+			}`)
+
+			approval := engineclient.EngineEvent{
+				ProtocolVersion: engineclient.ProtocolVersion,
+				RequestID:       "test-request-id",
+				Event:           "approval.required",
+				OK:              true,
+				Status:          "approval_required",
+				Data:            approvalData,
+			}
+			completed := engineclient.EngineEvent{
+				ProtocolVersion: engineclient.ProtocolVersion,
+				RequestID:       "test-request-id",
+				Event:           "run.completed",
+				OK:              true,
+				Status:          "approval_required",
+				Data:            approvalData,
+			}
+
+			if err := handler(
+				`{"protocol_version":"rygnal.engine.v1","request_id":"test-request-id","timestamp":"2026-06-15T00:00:00.000Z","event":"approval.required","ok":true,"status":"approval_required","data":{}}`,
+				approval,
+			); err != nil {
+				return engineclient.Result{}, err
+			}
+
+			if err := handler(
+				`{"protocol_version":"rygnal.engine.v1","request_id":"test-request-id","timestamp":"2026-06-15T00:00:00.000Z","event":"run.completed","ok":true,"status":"approval_required","data":{}}`,
+				completed,
+			); err != nil {
+				return engineclient.Result{}, err
+			}
+
+			return engineclient.Result{
+				EventCount: 2,
+				LastEvent:  &completed,
+			}, nil
+		},
 	}
 }
 

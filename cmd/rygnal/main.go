@@ -9,6 +9,10 @@ import (
 
 func main() {
 	if err := cli.Execute(); err != nil {
+		if code, ok := cli.ExitCode(err); ok {
+			os.Exit(code)
+		}
+
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(1)
 	}

@@ -58,3 +58,72 @@ def delete_database():
     assert "call" in result
     assert "attribute" in result
     assert "argument_list" in result
+
+
+def test_rust_kernel_evaluates_safe_agent_action() -> None:
+    rygnal_kernel = pytest.importorskip("rygnal_kernel")
+
+    payload = {
+        "file_path": "tests/test_auth.py",
+        "action_type": "modified",
+        "raw_code": "def test_login():\n    assert True",
+    }
+
+    result = json.loads(rygnal_kernel.evaluate_agent_action(json.dumps(payload)))
+
+    assert result == {
+        "criticality_index": 0.5,
+        "risk_level": "safe",
+        "reasons": [],
+    }
+
+
+def test_rust_kernel_evaluates_dangerous_agent_action() -> None:
+    rygnal_kernel = pytest.importorskip("rygnal_kernel")
+
+    payload = {
+        "file_path": "config/database.yml",
+        "action_type": "deleted",
+        "raw_code": "",
+    }
+
+    result = json.loads(rygnal_kernel.evaluate_agent_action(json.dumps(payload)))
+
+    assert result == {
+        "criticality_index": 9.0,
+        "risk_level": "dangerous",
+        "reasons": [
+            "Modifies core configuration path",
+            "Destructive action: File deletion",
+        ],
+    }
+
+
+def test_rust_kernel_evaluates_semantic_agent_action() -> None:
+    rygnal_kernel = pytest.importorskip("rygnal_kernel")
+
+    payload = {
+        "file_path": "src/cleanup.py",
+        "action_type": "modified",
+        "raw_code": 'import os\n\ndef cleanup():\n    os.remove("production.db")\n',
+    }
+
+    result = json.loads(rygnal_kernel.evaluate_agent_action(json.dumps(payload)))
+
+    assert result == {
+        "criticality_index": 6.0,
+        "risk_level": "risky",
+        "reasons": [
+            "Introduces or modifies dependencies (import statement)",
+            "Contains system or external attribute calls",
+        ],
+    }
+
+
+def test_rust_kernel_rejects_invalid_agent_action_payload() -> None:
+    rygnal_kernel = pytest.importorskip("rygnal_kernel")
+
+    bad_payload = '{"file_path": "src/main.py"}'
+
+    with pytest.raises(ValueError, match="Invalid action payload"):
+        rygnal_kernel.evaluate_agent_action(bad_payload)

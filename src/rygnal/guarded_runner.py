@@ -13,6 +13,7 @@ from typing import Protocol
 from rygnal.audit_logger import AuditLogger
 from rygnal.change_risk import (
     ChangeRiskClassificationError,
+    ChangeRiskReason,
     ChangeRiskReport,
     classify_patch_risk,
 )
@@ -48,6 +49,10 @@ from rygnal.process_containment import (
 )
 from rygnal.repo_state import DirtyRepositoryError, get_uncommitted_changes
 from rygnal.risk_engine import RiskLevel
+from rygnal.subjective_risk import (
+    SubjectiveRiskCollectionError,
+    collect_subjective_patch_reasons,
+)
 from rygnal.untracked_files import UntrackedFilePolicy
 from rygnal.workspace_cleanup import CleanupResult, CleanupStatus, destroy_worktree
 
@@ -700,9 +705,22 @@ def run_guarded(config: GuardedRunConfig) -> GuardedRunResult:
 
 
 def classify_and_decide_patch(patch_diff: PatchDiff) -> PatchRiskDecision:
-    """Hard enforcement gate for guarded workspace patches."""
+    """Hard enforcement gate for guarded workspace patches.
+
+    The deterministic patch classifier remains the first authority. The
+    subjective-risk layer can only add report-level reasons; it never removes
+    deterministic reasons or downgrades a risky deterministic decision.
+    """
 
     report = classify_patch_risk(patch_diff)
+    subjective_reasons = _collect_subjective_validation_reasons(patch_diff, report)
+
+    if subjective_reasons:
+        report = classify_patch_risk(
+            patch_diff,
+            validation_reasons=subjective_reasons,
+        )
+
     risk_level = report.overall_risk_level
 
     if risk_level == RiskLevel.CRITICAL:
@@ -727,6 +745,49 @@ def classify_and_decide_patch(patch_diff: PatchDiff) -> PatchRiskDecision:
         reason="Guarded patch accepted by deterministic patch-risk gate.",
         report=report,
     )
+
+
+def _collect_subjective_validation_reasons(
+    patch_diff: PatchDiff,
+    report: ChangeRiskReport,
+) -> tuple[ChangeRiskReason, ...]:
+    """Collect subjective-risk report reasons for guarded patch classification."""
+
+    system_risk_by_path = {
+        file_risk.path: _system_risk_score_for_level(file_risk.risk_level)
+        for file_risk in report.files
+    }
+
+    try:
+        return collect_subjective_patch_reasons(
+            workspace_path=patch_diff.workspace_path,
+            baseline_commit_sha=patch_diff.baseline_commit_sha,
+            files=patch_diff.files,
+            system_risk_by_path=system_risk_by_path,
+            file_risk_by_path={file_risk.path: file_risk for file_risk in report.files},
+        )
+    except SubjectiveRiskCollectionError as exc:
+        return (
+            ChangeRiskReason(
+                code="subjective-risk-collection-failed",
+                risk_level=RiskLevel.HIGH,
+                reason=(
+                    "Subjective human-context analysis could not complete; "
+                    "guarded patch requires human approval."
+                ),
+                evidence=(("error", str(exc)),),
+            ),
+        )
+
+
+def _system_risk_score_for_level(risk_level: RiskLevel) -> float:
+    if risk_level == RiskLevel.CRITICAL:
+        return 8.5
+    if risk_level == RiskLevel.HIGH:
+        return 6.5
+    if risk_level == RiskLevel.MEDIUM:
+        return 4.0
+    return 2.0
 
 
 def _select_backend(config: GuardedRunConfig) -> ExecutionBackendSelection:

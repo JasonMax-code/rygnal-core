@@ -29,6 +29,20 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+
+      - name: Rust format check
+        run: cargo fmt --manifest-path rust-kernel/Cargo.toml -- --check
+
+      - name: Rust tests
+        run: cargo test --manifest-path rust-kernel/Cargo.toml
+
+      - name: Rust clippy
+        run: cargo clippy --manifest-path rust-kernel/Cargo.toml -- -D warnings
+
       - name: Ruff lint check
         run: ruff check .
 

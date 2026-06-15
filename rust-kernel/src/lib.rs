@@ -1,6 +1,7 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use serde::Deserialize;
+use tree_sitter::Parser;
 
 #[derive(Deserialize, Debug)]
 struct FileChange {
@@ -53,9 +54,33 @@ fn evaluate_patch_risk(json_payload: String) -> PyResult<String> {
     ))
 }
 
+/// Parses raw Python code and returns its Tree-Sitter AST structure.
+#[pyfunction]
+fn analyze_code_structure(raw_code: String) -> PyResult<String> {
+    let mut parser = Parser::new();
+
+    let language = tree_sitter_python::language();
+    parser
+        .set_language(language)
+        .map_err(|err| PyValueError::new_err(format!("Failed to load Python grammar: {}", err)))?;
+
+    let tree = parser.parse(&raw_code, None).ok_or_else(|| {
+        PyValueError::new_err("Tree-Sitter failed to parse the provided code")
+    })?;
+
+    let root_node = tree.root_node();
+
+    Ok(format!(
+        "AST Parsed Successfully.\nNode Count: {}\nStructure: {}",
+        root_node.child_count(),
+        root_node.to_sexp()
+    ))
+}
+
 #[pymodule]
 fn rygnal_kernel(_py: Python, module: &PyModule) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(verify_bridge, module)?)?;
     module.add_function(wrap_pyfunction!(evaluate_patch_risk, module)?)?;
+    module.add_function(wrap_pyfunction!(analyze_code_structure, module)?)?;
     Ok(())
 }

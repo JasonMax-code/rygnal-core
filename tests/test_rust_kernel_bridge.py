@@ -38,3 +38,23 @@ def test_rust_kernel_rejects_invalid_patch_json() -> None:
 
     with pytest.raises(ValueError, match="Rust safety kernel failed to parse JSON"):
         rygnal_kernel.evaluate_patch_risk(bad_payload)
+
+
+def test_rust_kernel_analyzes_python_code_structure() -> None:
+    rygnal_kernel = pytest.importorskip("rygnal_kernel")
+
+    raw_code = """
+import os
+
+def delete_database():
+    os.remove("production.db")
+"""
+
+    result = rygnal_kernel.analyze_code_structure(raw_code)
+
+    assert "AST Parsed Successfully." in result
+    assert "import_statement" in result
+    assert "function_definition" in result
+    assert "call" in result
+    assert "attribute" in result
+    assert "argument_list" in result

@@ -61,7 +61,7 @@ def test_runner_docs_patch_auto_applies_only_after_runner_completes(
     assert audit.verify_integrity()
 
 
-def test_runner_risky_source_patch_requires_approval_before_apply(
+def test_runner_dependency_patch_requires_approval_before_apply(
     tmp_path: Path,
 ) -> None:
     trusted = create_trusted_repo(tmp_path / "trusted")
@@ -72,37 +72,35 @@ def test_runner_risky_source_patch_requires_approval_before_apply(
             trusted,
             py_command(
                 "from pathlib import Path; "
-                "Path('src/new_feature.py').write_text('def run():\\n    return 42\\n')"
+                "Path('pyproject.toml').write_text("
+                "'[project]\\nname = \"changed\"\\n'"
+                ")"
             ),
             audit_logger=audit,
         )
     )
 
-    assert result.status == GuardedRunStatus.COMPLETED
+    assert result.status == GuardedRunStatus.APPROVAL_REQUIRED
     assert result.patch_diff is not None
+    assert result.change_risk_report is not None
+    assert result.approval_request is not None
+    assert result.approval_request.target == result.patch_diff.patch_sha256
     assert git_status_porcelain(trusted) == ""
 
-    risk_report = classify_patch_risk(result.patch_diff)
     safe_result = auto_apply_safe_patch(
         result.patch_diff,
         trusted,
-        risk_report=risk_report,
+        risk_report=result.change_risk_report,
         logger=audit,
         trace_id="trace_integration",
     )
 
     assert safe_result.outcome == SafePatchApplyOutcome.SKIPPED
     assert safe_result.applied is False
-    assert not (trusted / "src" / "new_feature.py").exists()
+    assert not (trusted / "pyproject.toml").exists()
 
-    approval_request = create_patch_approval_request(
-        result.patch_diff,
-        requested_by="test_reviewer",
-        risk_report=risk_report,
-        trace_id="trace_integration",
-    )
     approval_decision = approve_patch_request(
-        approval_request,
+        result.approval_request,
         decided_by="test_reviewer",
         patch_sha256=result.patch_diff.patch_sha256,
     )
@@ -110,14 +108,16 @@ def test_runner_risky_source_patch_requires_approval_before_apply(
     approved_result = apply_approved_patch(
         result.patch_diff,
         trusted,
-        approval_request=approval_request,
+        approval_request=result.approval_request,
         approval_decision=approval_decision,
-        risk_report=risk_report,
+        risk_report=result.change_risk_report,
         logger=audit,
     )
 
     assert approved_result.applied is True
-    assert (trusted / "src" / "new_feature.py").exists()
+    assert (trusted / "pyproject.toml").read_text(
+        encoding="utf-8"
+    ) == '[project]\nname = "changed"\n'
     assert audit.verify_integrity()
 
 
@@ -174,23 +174,20 @@ def test_runner_patch_stale_baseline_rejected_by_approved_apply(
             trusted,
             py_command(
                 "from pathlib import Path; "
-                "Path('src/stale_feature.py').write_text('def stale():\\n    return True\\n')"
+                "Path('pyproject.toml').write_text("
+                "'[project]\\nname = \"changed\"\\n'"
+                ")"
             ),
         )
     )
 
-    assert result.status == GuardedRunStatus.COMPLETED
+    assert result.status == GuardedRunStatus.APPROVAL_REQUIRED
     assert result.patch_diff is not None
+    assert result.change_risk_report is not None
+    assert result.approval_request is not None
 
-    risk_report = classify_patch_risk(result.patch_diff)
-    approval_request = create_patch_approval_request(
-        result.patch_diff,
-        requested_by="test_reviewer",
-        risk_report=risk_report,
-        trace_id="trace_integration",
-    )
     approval_decision = approve_patch_request(
-        approval_request,
+        result.approval_request,
         decided_by="test_reviewer",
         patch_sha256=result.patch_diff.patch_sha256,
     )
@@ -205,9 +202,9 @@ def test_runner_patch_stale_baseline_rejected_by_approved_apply(
         apply_approved_patch(
             result.patch_diff,
             trusted,
-            approval_request=approval_request,
+            approval_request=result.approval_request,
             approval_decision=approval_decision,
-            risk_report=risk_report,
+            risk_report=result.change_risk_report,
         )
 
 

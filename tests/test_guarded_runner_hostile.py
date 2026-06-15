@@ -113,7 +113,7 @@ def test_hostile_large_change_skips_auto_apply(
         )
     )
 
-    assert result.status == GuardedRunStatus.BLOCKED
+    assert result.status == GuardedRunStatus.APPROVAL_REQUIRED
     assert result.patch_diff is not None
     assert result.change_risk_report is not None
     assert result.blocked_reason is not None
@@ -149,7 +149,7 @@ def test_hostile_dependency_manifest_change_remains_visible_and_skips_auto_apply
         )
     )
 
-    assert result.status == GuardedRunStatus.BLOCKED
+    assert result.status == GuardedRunStatus.APPROVAL_REQUIRED
     assert result.patch_diff is not None
     assert result.change_risk_report is not None
     assert result.blocked_reason is not None

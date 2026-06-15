@@ -116,6 +116,63 @@ def test_engine_api_streams_successful_guarded_run_without_raw_payloads(tmp_path
     assert not (repo / "agent_output.txt").exists()
 
 
+def test_engine_api_approval_required_summary_includes_risk_block(
+    tmp_path: Path,
+) -> None:
+    repo = _create_repo(tmp_path / "trusted")
+    request = {
+        "protocol_version": "rygnal.engine.v1",
+        "action": "guarded_run.start",
+        "request_id": "approval-required-risk-test",
+        "trusted_repo_path": repo.as_posix(),
+        "command": [
+            sys.executable,
+            "-c",
+            (
+                "from pathlib import Path; "
+                "Path('pyproject.toml').write_text("
+                "'[project]\\nname = \\\"changed\\\"\\n'"
+                ")"
+            ),
+        ],
+        "unsafe_local_requested": True,
+        "run_root": (tmp_path / "runs").as_posix(),
+    }
+
+    completed = _run_engine_api(json.dumps(request) + "\n")
+
+    assert completed.returncode == 0
+    assert completed.stderr == ""
+
+    events = _parse_ndjson(completed.stdout)
+    event_names = [event["event"] for event in events]
+    approval_event = next(event for event in events if event["event"] == "approval.required")
+    final = events[-1]
+
+    assert event_names.index("approval.required") < event_names.index("run.completed")
+    assert approval_event["ok"] is True
+    assert approval_event["status"] == "approval_required"
+    assert approval_event["data"]["status"] == "approval_required"
+
+    assert final["event"] == "run.completed"
+    assert final["ok"] is True
+    assert final["status"] == "approval_required"
+
+    data = final["data"]
+    assert approval_event["data"]["approval"] == data["approval"]
+    assert approval_event["data"]["risk"] == data["risk"]
+    assert data["status"] == "approval_required"
+    assert data["approval"]["required"] is True
+    assert data["approval"]["approval_id"]
+    assert data["approval"]["target"] == data["patch"]["sha256"]
+    assert data["risk"]["present"] is True
+    assert data["risk"]["level"] == "high"
+    assert "dependency-file-change" in data["risk"]["reasons"]
+    assert data["risk"]["counts"]["high"] >= 1
+    assert "raw" not in data["patch"]
+    assert not (repo / "pyproject.toml").exists()
+
+
 def test_engine_api_treats_agent_failure_as_successful_engine_run(tmp_path: Path) -> None:
     repo = _create_repo(tmp_path / "trusted")
     request = {

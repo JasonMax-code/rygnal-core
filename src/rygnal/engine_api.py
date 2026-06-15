@@ -189,12 +189,25 @@ def _run_guarded_request(request: EngineRequest) -> None:
         )
     )
 
+    final_status = _engine_status_for_guarded_result(result)
+    final_summary = _guarded_result_summary(result, request)
+
+    if final_status == EngineStatus.APPROVAL_REQUIRED:
+        _emit(
+            make_event(
+                request_id=request.request_id,
+                event=EngineEventName.APPROVAL_REQUIRED,
+                status=EngineStatus.APPROVAL_REQUIRED,
+                data=final_summary,
+            )
+        )
+
     _emit(
         make_event(
             request_id=request.request_id,
             event=EngineEventName.RUN_COMPLETED,
-            status=_engine_status_for_guarded_result(result),
-            data=_guarded_result_summary(result, request),
+            status=final_status,
+            data=final_summary,
         )
     )
 
@@ -235,6 +248,9 @@ def _engine_status_for_guarded_result(result: GuardedRunResult) -> EngineStatus:
     if result.status == GuardedRunStatus.TIMED_OUT:
         return EngineStatus.TIMED_OUT
 
+    if result.status == GuardedRunStatus.APPROVAL_REQUIRED:
+        return EngineStatus.APPROVAL_REQUIRED
+
     if result.status == GuardedRunStatus.BLOCKED:
         return EngineStatus.BLOCKED
 
@@ -242,6 +258,22 @@ def _engine_status_for_guarded_result(result: GuardedRunResult) -> EngineStatus:
         return EngineStatus.CLEANUP_FAILED
 
     return EngineStatus.BLOCKED if result.blocked_reason else EngineStatus.COMMAND_FAILED
+
+
+def _approval_summary(result: GuardedRunResult) -> dict[str, Any]:
+    approval_request = getattr(result, "approval_request", None)
+
+    if approval_request is None:
+        return {"required": False}
+
+    return {
+        "required": True,
+        "approval_id": approval_request.approval_id,
+        "target": approval_request.target,
+        "policy_id": approval_request.policy_id,
+        "severity": approval_request.severity.value,
+        "reason": approval_request.reason,
+    }
 
 
 def _guarded_result_summary(result: GuardedRunResult, request: EngineRequest) -> dict[str, Any]:
@@ -286,8 +318,38 @@ def _guarded_result_summary(result: GuardedRunResult, request: EngineRequest) ->
             ),
         },
         "patch": _patch_summary(result, request),
+        "risk": _risk_summary(result),
         "blocked_reason": result.blocked_reason,
+        "approval": _approval_summary(result),
         "warnings": tuple(dict.fromkeys(result.warnings)),
+    }
+
+
+def _risk_summary(result: GuardedRunResult) -> dict[str, Any]:
+    risk_report = result.change_risk_report
+
+    if risk_report is None:
+        return {
+            "present": False,
+            "level": "low",
+            "reasons": (),
+            "counts": {},
+        }
+
+    reason_codes: list[str] = []
+
+    for report_reason in risk_report.report_reasons:
+        reason_codes.append(report_reason.code)
+
+    for file_risk in risk_report.files:
+        for reason in file_risk.reasons:
+            reason_codes.append(reason.code)
+
+    return {
+        "present": True,
+        "level": risk_report.overall_risk_level.value,
+        "reasons": tuple(dict.fromkeys(reason_codes)),
+        "counts": risk_report.risk_counts,
     }
 
 

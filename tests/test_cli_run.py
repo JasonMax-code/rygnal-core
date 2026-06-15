@@ -147,6 +147,7 @@ def test_cli_passes_expected_config_to_run_guarded(
     [
         (GuardedRunStatus.COMPLETED, cli_run.EXIT_COMPLETED),
         (GuardedRunStatus.FAILED, cli_run.EXIT_COMMAND_FAILED),
+        (GuardedRunStatus.APPROVAL_REQUIRED, cli_run.EXIT_APPROVAL_REQUIRED),
         (GuardedRunStatus.BLOCKED, cli_run.EXIT_BLOCKED),
         (GuardedRunStatus.TIMED_OUT, cli_run.EXIT_TIMED_OUT),
         (GuardedRunStatus.CLEANUP_FAILED, cli_run.EXIT_CLEANUP_FAILED),

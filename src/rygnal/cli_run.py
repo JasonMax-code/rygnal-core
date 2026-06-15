@@ -20,9 +20,10 @@ from rygnal.guarded_runner import (
 EXIT_COMPLETED = 0
 EXIT_COMMAND_FAILED = 1
 EXIT_BLOCKED = 2
-EXIT_TIMED_OUT = 3
-EXIT_CLEANUP_FAILED = 4
-EXIT_USAGE_ERROR = 5
+EXIT_APPROVAL_REQUIRED = 3
+EXIT_TIMED_OUT = 4
+EXIT_CLEANUP_FAILED = 5
+EXIT_USAGE_ERROR = 64
 
 
 def default_guarded_run_root() -> Path:
@@ -102,6 +103,8 @@ def exit_code_for_result(result: GuardedRunResult) -> int:
         return EXIT_COMPLETED
     if status == GuardedRunStatus.FAILED:
         return EXIT_COMMAND_FAILED
+    if status == GuardedRunStatus.APPROVAL_REQUIRED:
+        return EXIT_APPROVAL_REQUIRED
     if status == GuardedRunStatus.BLOCKED:
         return EXIT_BLOCKED
     if status == GuardedRunStatus.TIMED_OUT:
@@ -138,6 +141,10 @@ def render_guarded_run_summary(result: GuardedRunResult) -> str:
     if blocked_reason:
         lines.append(f"Reason: {blocked_reason}")
 
+    approval_request = getattr(result, "approval_request", None)
+    if approval_request is not None:
+        lines.append(f"Approval ID: {approval_request.approval_id}")
+
     lines.extend(
         [
             "",
@@ -170,7 +177,10 @@ def render_guarded_run_summary(result: GuardedRunResult) -> str:
 
     lines.append("")
     lines.append("Next:")
-    if result.status == GuardedRunStatus.BLOCKED:
+    if result.status == GuardedRunStatus.APPROVAL_REQUIRED:
+        lines.append("  Review and approve the guarded patch before applying it.")
+        lines.append("  Do not apply changes directly from the disposable workspace.")
+    elif result.status == GuardedRunStatus.BLOCKED:
         lines.append("  Fix the blocked reason and rerun the command.")
         lines.append(
             "  For dirty tracked repos, commit/stash changes or rerun with `--allow-dirty`."
@@ -217,6 +227,21 @@ def to_safe_json_summary(result: GuardedRunResult) -> dict[str, Any]:
             "size_bytes": patch.patch_size_bytes if patch else 0,
         },
         "warnings": _unique_warnings(result.warnings),
+    }
+
+
+def _approval_json_summary(result: GuardedRunResult) -> dict[str, Any]:
+    approval_request = getattr(result, "approval_request", None)
+
+    if approval_request is None:
+        return {"required": False}
+
+    return {
+        "required": True,
+        "approval_id": approval_request.approval_id,
+        "target": approval_request.target,
+        "severity": approval_request.severity.value,
+        "reason": approval_request.reason,
     }
 
 

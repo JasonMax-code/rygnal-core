@@ -224,7 +224,7 @@ def test_cli_run_timeout_returns_timeout_exit_code_and_keeps_repo_clean(
         cwd=trusted,
     )
 
-    assert result.returncode == 3
+    assert result.returncode == 4
     assert "Status: timed_out" in result.stdout
     assert "Timed out: yes" in result.stdout
     assert git_status_porcelain(trusted) == ""

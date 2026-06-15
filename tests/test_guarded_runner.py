@@ -465,7 +465,7 @@ def test_added_modified_deleted_files_are_detected_and_patch_is_generated(
 
     paths = {file.path for file in result.changed_file_report.files}
 
-    assert result.status == GuardedRunStatus.BLOCKED
+    assert result.status == GuardedRunStatus.APPROVAL_REQUIRED
     assert {"new.txt", "README.md", "delete_me.txt"}.issubset(paths)
     assert result.patch_diff is not None
     assert result.change_risk_report is not None
@@ -641,7 +641,7 @@ def test_bubblewrap_backend_can_run_simple_command(
     assert not (repo / "bwrap.txt").exists()
 
 
-def test_high_risk_dependency_patch_is_blocked_before_completion(tmp_path: Path) -> None:
+def test_high_risk_dependency_patch_requires_approval_before_completion(tmp_path: Path) -> None:
     repo = create_repo(tmp_path / "repo")
     audit = AuditLogger(tmp_path / "audit.jsonl")
 
@@ -656,13 +656,19 @@ def test_high_risk_dependency_patch_is_blocked_before_completion(tmp_path: Path)
         )
     )
 
-    assert result.status == GuardedRunStatus.BLOCKED
+    assert result.status == GuardedRunStatus.APPROVAL_REQUIRED
     assert result.patch_diff is not None
+    assert result.approval_request is not None
+    assert result.approval_request.target == result.patch_diff.patch_sha256
+    assert result.approval_request.requested_by == "local_user"
+    assert result.approval_request.agent_id == "local_agent"
+    assert result.approval_request.environment == "local"
     assert result.change_risk_report is not None
     assert result.change_risk_report.overall_risk_level == RiskLevel.HIGH
     assert "requires approval" in result.blocked_reason
     assert "guarded_run.patch_classified" in audit_actions(audit)
-    assert "guarded_run.patch_blocked" in audit_actions(audit)
+    assert "guarded_run.patch_approval_required" in audit_actions(audit)
+    assert "guarded_run.patch_blocked" not in audit_actions(audit)
     assert result.cleanup_performed is True
     assert not Path(result.workspace_path).exists()
     assert audit.verify_integrity()
@@ -685,9 +691,11 @@ def test_critical_secret_patch_is_blocked_before_completion(tmp_path: Path) -> N
 
     assert result.status == GuardedRunStatus.BLOCKED
     assert result.patch_diff is not None
+    assert result.approval_request is None
     assert result.change_risk_report is not None
     assert result.change_risk_report.overall_risk_level == RiskLevel.CRITICAL
-    assert "requires approval" in result.blocked_reason
+    assert "blocked" in result.blocked_reason
+    assert "critical risk" in result.blocked_reason
     assert "guarded_run.patch_blocked" in audit_actions(audit)
     assert result.cleanup_performed is True
     assert not Path(result.workspace_path).exists()

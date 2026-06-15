@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.rygnal.local/engine_event.schema.json",
+  "title": "Rygnal Engine NDJSON Event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "request_id",
+    "timestamp",
+    "event",
+    "ok",
+    "status",
+    "data",
+    "error"
+  ],
+  "properties": {
+    "protocol_version": {
+      "type": "string",
+      "const": "rygnal.engine.v1"
+    },
+    "request_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC ISO-8601 timestamp."
+    },
+    "event": {
+      "type": "string",
+      "enum": [
+        "engine.started",
+        "request.accepted",
+        "run.started",
+        "workspace.created",
+        "command.started",
+        "command.finished",
+        "workspace.cleaned",
+        "approval.required",
+        "run.completed",
+        "run.failed",
+        "engine.error"
+      ]
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "starting",
+        "accepted",
+        "running",
+        "workspace_created",
+        "command_started",
+        "command_finished",
+        "workspace_cleaned",
+        "approval_required",
+        "completed",
+        "command_failed",
+        "timed_out",
+        "blocked",
+        "cleanup_failed",
+        "invalid_json",
+        "invalid_request",
+        "unknown_action",
+        "internal_error"
+      ]
+    },
+    "data": {
+      "type": "object"
+    },
+    "error": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["code", "message", "details"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "details": {
+          "type": "object"
+        }
+      }
+    }
+  }
+}

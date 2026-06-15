@@ -56,6 +56,94 @@ type EngineError struct {
 	Details json.RawMessage `json:"details"`
 }
 
+type RunCompletedData struct {
+	Status                string       `json:"status"`
+	RunID                 string       `json:"run_id"`
+	TrustedRepo           SafePathInfo `json:"trusted_repo"`
+	WorkspacePathReturned bool         `json:"workspace_path_returned"`
+	BaselineCommitSHA     string       `json:"baseline_commit_sha"`
+	Backend               BackendInfo  `json:"backend"`
+	Cleanup               CleanupInfo  `json:"cleanup"`
+	Command               CommandInfo  `json:"command"`
+	Changes               ChangesInfo  `json:"changes"`
+	Patch                 PatchInfo    `json:"patch"`
+	Risk                  RiskInfo     `json:"risk"`
+	BlockedReason         string       `json:"blocked_reason"`
+	Approval              ApprovalInfo `json:"approval"`
+	Warnings              []string     `json:"warnings"`
+}
+
+type SafePathInfo struct {
+	AbsolutePathReturned bool   `json:"absolute_path_returned"`
+	Digest               string `json:"digest"`
+}
+
+type BackendInfo struct {
+	Name                string `json:"name"`
+	SafeByDefault       bool   `json:"safe_by_default"`
+	ContainmentVerified bool   `json:"containment_verified"`
+}
+
+type CleanupInfo struct {
+	Performed bool   `json:"performed"`
+	Status    string `json:"status"`
+}
+
+type CommandInfo struct {
+	Present    bool `json:"present"`
+	ExitCode   *int `json:"exit_code"`
+	TimedOut   bool `json:"timed_out"`
+	DurationMs int  `json:"duration_ms"`
+}
+
+type ChangesInfo struct {
+	ChangedFileCount int           `json:"changed_file_count"`
+	IgnoredFileCount int           `json:"ignored_file_count"`
+	Files            []ChangedFile `json:"files"`
+}
+
+type ChangedFile struct {
+	Path        string `json:"path"`
+	Kind        string `json:"kind"`
+	OldPath     string `json:"old_path"`
+	ModeChanged bool   `json:"mode_changed"`
+}
+
+type PatchInfo struct {
+	Generated bool   `json:"generated"`
+	SHA256    string `json:"sha256"`
+	SizeBytes int    `json:"size_bytes"`
+}
+
+type RiskInfo struct {
+	Present bool           `json:"present"`
+	Level   string         `json:"level"`
+	Reasons []string       `json:"reasons"`
+	Counts  map[string]int `json:"counts"`
+}
+
+type ApprovalInfo struct {
+	Required   bool   `json:"required"`
+	ApprovalID string `json:"approval_id"`
+	Target     string `json:"target"`
+	PolicyID   string `json:"policy_id"`
+	Severity   string `json:"severity"`
+	Reason     string `json:"reason"`
+}
+
+func DecodeRunCompletedData(event EngineEvent) (RunCompletedData, error) {
+	var data RunCompletedData
+	if len(event.Data) == 0 {
+		return data, nil
+	}
+
+	if err := json.Unmarshal(event.Data, &data); err != nil {
+		return data, fmt.Errorf("decode run completed data: %w", err)
+	}
+
+	return data, nil
+}
+
 type EngineOptions struct {
 	RequestID       string
 	TrustedRepoPath string

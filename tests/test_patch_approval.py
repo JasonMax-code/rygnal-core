@@ -1,5 +1,6 @@
 import shutil
 import subprocess
+from datetime import UTC
 from pathlib import Path
 
 import pytest
@@ -210,3 +211,99 @@ def test_approval_is_bound_to_patch_digest(tmp_path: Path) -> None:
         patch_sha256=patch.patch_sha256,
     )
     assert_patch_approval_granted(request, approved, patch)
+
+
+def test_approved_decision_carries_request_baseline_binding(tmp_path: Path) -> None:
+    guarded, _trusted = clone_fixture(tmp_path)
+    src = guarded / "src"
+    src.mkdir()
+    (src / "app.py").write_text("print('hello')\n", encoding="utf-8")
+
+    patch = generate_patch_diff(guarded, baseline_sha(guarded))
+    request = create_patch_approval_request(patch, requested_by="test_user")
+    approved = approve_patch_request(
+        request,
+        decided_by="reviewer",
+        patch_sha256=patch.patch_sha256,
+    )
+
+    assert approved.metadata["patch_sha256"] == patch.patch_sha256
+    assert approved.metadata["baseline_commit_sha"] == patch.baseline_commit_sha
+
+
+def test_stale_patch_approval_is_rejected(tmp_path: Path) -> None:
+    from datetime import datetime, timedelta
+
+    guarded, _trusted = clone_fixture(tmp_path)
+    src = guarded / "src"
+    src.mkdir()
+    (src / "app.py").write_text("print('hello')\n", encoding="utf-8")
+
+    patch = generate_patch_diff(guarded, baseline_sha(guarded))
+    request = create_patch_approval_request(patch, requested_by="test_user")
+
+    stale_created_at = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
+    stale_request = request.model_copy(update={"created_at": stale_created_at})
+    approved = approve_patch_request(
+        stale_request,
+        decided_by="reviewer",
+        patch_sha256=patch.patch_sha256,
+    )
+
+    with pytest.raises(PatchApprovalError, match="stale|expired"):
+        assert_patch_approval_granted(stale_request, approved, patch)
+
+
+def test_approval_request_baseline_mismatch_is_rejected(tmp_path: Path) -> None:
+    guarded, _trusted = clone_fixture(tmp_path)
+    src = guarded / "src"
+    src.mkdir()
+    (src / "app.py").write_text("print('hello')\n", encoding="utf-8")
+
+    patch = generate_patch_diff(guarded, baseline_sha(guarded))
+    request = create_patch_approval_request(patch, requested_by="test_user")
+    mismatched_request = request.model_copy(
+        update={
+            "metadata": {
+                **request.metadata,
+                "baseline_commit_sha": "deadbeef",
+            }
+        }
+    )
+    approved = approve_patch_request(
+        mismatched_request,
+        decided_by="reviewer",
+        patch_sha256=patch.patch_sha256,
+    )
+
+    with pytest.raises(PatchApprovalError, match="baseline"):
+        assert_patch_approval_granted(mismatched_request, approved, patch)
+
+
+def test_malformed_pending_approval_decision_is_rejected_as_invalid_transition(
+    tmp_path: Path,
+) -> None:
+    from rygnal.models import ApprovalDecision, ApprovalStatus, utc_now_iso
+
+    guarded, _trusted = clone_fixture(tmp_path)
+    src = guarded / "src"
+    src.mkdir()
+    (src / "app.py").write_text("print('hello')\n", encoding="utf-8")
+
+    patch = generate_patch_diff(guarded, baseline_sha(guarded))
+    request = create_patch_approval_request(patch, requested_by="test_user")
+    malformed_decision = ApprovalDecision(
+        approval_id=request.approval_id,
+        status=ApprovalStatus.PENDING,
+        approved=True,
+        decided_by="reviewer",
+        decided_at=utc_now_iso(),
+        reason="Malformed approval.",
+        metadata={
+            "patch_sha256": patch.patch_sha256,
+            "baseline_commit_sha": patch.baseline_commit_sha,
+        },
+    )
+
+    with pytest.raises(PatchApprovalError, match="Invalid approval state transition"):
+        assert_patch_approval_granted(request, malformed_decision, patch)

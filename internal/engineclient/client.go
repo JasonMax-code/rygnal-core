@@ -32,6 +32,8 @@ type EngineRequest struct {
 	TrustedRepoPath      string       `json:"trusted_repo_path"`
 	Command              []string     `json:"command"`
 	TimeoutSeconds       int          `json:"timeout_seconds"`
+	RunRoot              string       `json:"run_root,omitempty"`
+	AuditLogPath         string       `json:"audit_log_path,omitempty"`
 	UnsafeLocalRequested bool         `json:"unsafe_local_requested"`
 	Environment          string       `json:"environment"`
 	UserID               string       `json:"user_id"`
@@ -113,6 +115,7 @@ type PatchInfo struct {
 	Generated bool   `json:"generated"`
 	SHA256    string `json:"sha256"`
 	SizeBytes int    `json:"size_bytes"`
+	Raw       string `json:"raw,omitempty"`
 }
 
 type RiskInfo struct {
@@ -148,6 +151,8 @@ type EngineOptions struct {
 	RequestID       string
 	TrustedRepoPath string
 	AgentArgs       []string
+	AuditLogPath    string
+	IncludeRawPatch bool
 
 	UnsafeLocal bool
 	DebugMode   bool
@@ -279,12 +284,13 @@ func buildRequest(opts EngineOptions) EngineRequest {
 		TrustedRepoPath:      opts.TrustedRepoPath,
 		Command:              append([]string(nil), opts.AgentArgs...),
 		TimeoutSeconds:       opts.TimeoutSec,
+		AuditLogPath:         opts.AuditLogPath,
 		UnsafeLocalRequested: opts.UnsafeLocal,
 		Environment:          "local",
 		UserID:               "local_user",
 		AgentID:              "go_cli",
 		Debug: DebugOptions{
-			IncludeRawPatch: false,
+			IncludeRawPatch: opts.IncludeRawPatch,
 			IncludeStdout:   false,
 			IncludeStderr:   false,
 		},

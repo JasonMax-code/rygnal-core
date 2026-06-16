@@ -128,6 +128,14 @@ func runExecutionPipeline(
 		return err
 	}
 
+	store, err := newLocalReviewStore(repoRoot)
+	if err != nil {
+		return err
+	}
+	if err := store.ensure(); err != nil {
+		return err
+	}
+
 	if opts.unsafeLocal && !opts.jsonMode {
 		fmt.Fprintln(
 			cmd.ErrOrStderr(),
@@ -145,6 +153,8 @@ func runExecutionPipeline(
 		RequestID:       requestID,
 		TrustedRepoPath: repoRoot,
 		AgentArgs:       append([]string(nil), agentArgs...),
+		AuditLogPath:    store.auditPath,
+		IncludeRawPatch: !opts.jsonMode,
 		UnsafeLocal:     opts.unsafeLocal,
 		DebugMode:       opts.debugMode,
 		TimeoutSec:      opts.timeoutSec,
@@ -162,6 +172,12 @@ func runExecutionPipeline(
 	})
 	if err != nil {
 		return err
+	}
+
+	if !opts.jsonMode {
+		if err := persistRunReviewArtifact(repoRoot, requestID, result.LastEvent); err != nil {
+			return err
+		}
 	}
 
 	return exitErrorForLastEvent(result.LastEvent)

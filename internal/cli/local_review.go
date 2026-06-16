@@ -48,8 +48,8 @@ type runReviewRecord struct {
 	BlockedReason  string                        `json:"blocked_reason"`
 	Warnings       []string                      `json:"warnings"`
 	Summary        engineclient.RunCompletedData `json:"summary"`
-	PatchPath      string                        `json:"patch_path,omitempty"`
-	SummaryPath    string                        `json:"summary_path,omitempty"`
+	PatchPath      string                        `json:"-"`
+	SummaryPath    string                        `json:"-"`
 	PatchDigest    string                        `json:"patch_digest,omitempty"`
 	ArtifactSchema string                        `json:"artifact_schema"`
 }
@@ -171,7 +171,7 @@ func persistRunReviewArtifact(repoRoot string, requestID string, event *enginecl
 		}
 
 		record.PatchPath = patchPath
-		record.PatchDigest = sha256Hex(data.Patch.Raw)
+		record.PatchDigest = sha256Hex(rawPatch)
 	}
 
 	summaryPath := filepath.Join(runDir, summaryFileName)

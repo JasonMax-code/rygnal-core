@@ -204,6 +204,31 @@ def evaluate_subjective_patch_file(
     return SubjectiveRiskFileAssessment(file_path=risk_input.file_path, assessment=assessment)
 
 
+def locked_file_change_to_reason(file_path: str) -> ChangeRiskReason:
+    """Return a critical reason for an explicit Rygnal locked-file edit.
+
+    This is intentionally independent of the optional Rust subjective kernel.
+    A user-authored lock marker is a deterministic safety boundary and must
+    fail closed even when semantic analysis is unavailable.
+    """
+
+    return ChangeRiskReason(
+        code="subjective-human-context-risk",
+        risk_level=RiskLevel.CRITICAL,
+        reason=(f"Explicit Rygnal lock marker raised guarded patch risk for {file_path}."),
+        evidence=(
+            ("path", file_path),
+            ("judgment", "block"),
+            ("total_criticality", 10.0),
+            ("human_multiplier", 1.0),
+            ("destruction_penalty", 0.0),
+            ("semantic_survival_ratio", 1.0),
+            ("explicitly_locked", True),
+            ("fallback", "deterministic-lock-marker"),
+        ),
+    )
+
+
 def subjective_assessment_to_reason(
     result: SubjectiveRiskFileAssessment,
     *,
@@ -255,38 +280,47 @@ def collect_subjective_patch_reasons(
     now: float | None = None,
     explicitly_locked_paths: Iterable[str] = (),
 ) -> tuple[ChangeRiskReason, ...]:
-    """Evaluate all changed files and return report-level subjective reasons."""
+    """Evaluate all changed files and return report-level subjective reasons.
+
+    Explicit Rygnal lock markers are deterministic safety boundaries. They must
+    block even when the optional Rust subjective-risk kernel is unavailable.
+    """
 
     reasons: list[ChangeRiskReason] = []
 
     for file_diff in files:
-        path = normalize_repo_relative_path(file_diff.path)
-        result = evaluate_subjective_patch_file(
+        system_risk = system_risk_by_path.get(file_diff.path, 0.0)
+
+        risk_input = collect_subjective_risk_input(
             workspace_path=workspace_path,
             baseline_commit_sha=baseline_commit_sha,
             file_diff=file_diff,
-            system_risk=system_risk_by_path.get(path, 0.0),
+            system_risk=system_risk,
             now=now,
             explicitly_locked_paths=explicitly_locked_paths,
         )
-        if result is None:
+
+        if risk_input.human_context.is_explicitly_locked:
+            reasons.append(locked_file_change_to_reason(risk_input.file_path))
             continue
 
-        critical_block = any(
-            "explicitly locked" in reason.lower() for reason in result.assessment.reasons
-        )
-
-        if (
-            not critical_block
-            and file_risk_by_path is not None
-            and _is_low_risk_documentation_change(path, file_risk_by_path.get(path))
-        ):
+        file_risk = (file_risk_by_path or {}).get(file_diff.path)
+        if file_risk is not None and file_risk.risk_level == RiskLevel.LOW:
             continue
 
-        reason = subjective_assessment_to_reason(
-            result,
-            critical_block=critical_block,
+        try:
+            assessment = evaluate_subjective_risk(risk_input)
+        except RustKernelUnavailableError:
+            continue
+        except RustKernelError as exc:
+            raise SubjectiveRiskCollectionError(str(exc)) from exc
+
+        result = SubjectiveRiskFileAssessment(
+            file_path=risk_input.file_path,
+            assessment=assessment,
         )
+        reason = subjective_assessment_to_reason(result, critical_block=False)
+
         if reason is not None:
             reasons.append(reason)
 
@@ -527,5 +561,6 @@ __all__ = [
     "collect_subjective_patch_reasons",
     "collect_subjective_risk_input",
     "evaluate_subjective_patch_file",
+    "locked_file_change_to_reason",
     "subjective_assessment_to_reason",
 ]

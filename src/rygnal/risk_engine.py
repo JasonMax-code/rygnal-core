@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 import shlex
+from collections import defaultdict
 from collections.abc import Iterable
 from enum import StrEnum
 from ipaddress import ip_address
@@ -439,6 +440,42 @@ class RiskyDestinationDetector:
         return signals
 
 
+class CredentialExfiltrationCorrelationDetector:
+    """Detect secret-like input being sent to an external destination.
+
+    This is intentionally a correlation detector: secret-like content alone is
+    risky, and external sending alone is risky, but both together indicate a
+    likely exfiltration path and should be explained as such.
+    """
+
+    def detect(self, context: RiskContext) -> list[RiskSignal]:
+        if not is_external_data_movement(context):
+            return []
+
+        if not contains_secret_like_input(context.input_text):
+            return []
+
+        urls = extract_urls(context.input_text)
+
+        return [
+            RiskSignal(
+                code="credential-exfiltration-attempt",
+                category=RiskSignalCategory.DESTINATION,
+                severity=RiskLevel.CRITICAL,
+                score=35,
+                confidence=0.95,
+                reason="Agent appears to send secret-like input to an external destination.",
+                evidence={
+                    "secret_like_input": True,
+                    "external_destination": True,
+                    "url_count": len(urls),
+                    "tool_name": context.tool_name,
+                },
+                reversible=False,
+            )
+        ]
+
+
 class DestructiveActionVariantDetector:
     """Detect destructive action naming variants."""
 
@@ -493,13 +530,27 @@ class CompoundRiskCorrelationDetector:
 
 
 class EnvironmentDetector:
-    """Detect risk based on execution environment."""
+    """Detect risk based on execution environment.
+
+    Non-local environments increase blast radius even when the individual tool
+    action looks ordinary. Production keeps its legacy signal for compatibility
+    and also receives the generic non-local amplification signal.
+    """
+
+    NON_LOCAL_ENVIRONMENTS = {
+        "ci",
+        "shared",
+        "staging",
+        "prod",
+        "production",
+    }
 
     def detect(self, context: RiskContext) -> list[RiskSignal]:
-        environment = context.environment.lower()
+        environment = context.environment.strip().lower()
+        signals: list[RiskSignal] = []
 
-        if environment == "production":
-            return [
+        if environment in {"production", "prod"}:
+            signals.append(
                 RiskSignal(
                     code="production-environment",
                     category=RiskSignalCategory.ENVIRONMENT,
@@ -509,9 +560,23 @@ class EnvironmentDetector:
                     evidence={"environment": context.environment},
                     reversible=None,
                 )
-            ]
+            )
 
-        return []
+        if environment in self.NON_LOCAL_ENVIRONMENTS:
+            signals.append(
+                RiskSignal(
+                    code="non-local-environment",
+                    category=RiskSignalCategory.ENVIRONMENT,
+                    severity=RiskLevel.MEDIUM,
+                    score=30,
+                    confidence=0.9,
+                    reason="Agent action is running outside a purely local environment.",
+                    evidence={"environment": context.environment},
+                    reversible=None,
+                )
+            )
+
+        return signals
 
 
 class RiskSignalRegistry:
@@ -530,6 +595,7 @@ class RiskSignalRegistry:
                 NormalizedCommandRiskDetector(),
                 SensitivePathRiskDetector(),
                 RiskyDestinationDetector(),
+                CredentialExfiltrationCorrelationDetector(),
                 DestructiveActionVariantDetector(),
                 CompoundRiskCorrelationDetector(),
                 InputSensitivityDetector(),
@@ -554,9 +620,12 @@ class RiskEngine:
         self,
         registry: RiskSignalRegistry | None = None,
         scoring_profile: RiskScoringProfile | None = None,
+        trace_history_limit: int = 20,
     ) -> None:
         self.registry = registry or RiskSignalRegistry.default()
         self.scoring_profile = scoring_profile or RiskScoringProfile()
+        self.trace_history_limit = trace_history_limit
+        self._trace_risk_history: dict[str, list[int]] = defaultdict(list)
 
     def assess(self, request: ToolRequest) -> RiskAssessment:
         """Assess risk for a tool request."""
@@ -577,7 +646,15 @@ class RiskEngine:
                 )
             )
 
-        risk_score = min(sum(signal.score for signal in signals), 100)
+        preliminary_score = self._score(signals)
+        cumulative_signal = self._cumulative_trace_signal(context, preliminary_score)
+
+        if cumulative_signal is not None:
+            signals.append(cumulative_signal)
+
+        risk_score = self._score(signals)
+        self._record_trace_risk(context, risk_score)
+
         risk_level = self.scoring_profile.level_from_score(risk_score)
         reasons = [signal.reason for signal in signals]
         confidence = self._confidence(signals)
@@ -590,6 +667,74 @@ class RiskEngine:
             confidence=confidence,
             explanation=self._explanation(risk_score, risk_level, signals),
         )
+
+    @staticmethod
+    def _score(signals: list[RiskSignal]) -> int:
+        return min(sum(signal.score for signal in signals), 100)
+
+    def _cumulative_trace_signal(
+        self,
+        context: RiskContext,
+        current_score: int,
+    ) -> RiskSignal | None:
+        trace_id = trace_identity(context)
+
+        if trace_id is None:
+            return None
+
+        if current_score < self.scoring_profile.medium_threshold:
+            return None
+
+        history = self._trace_risk_history.get(trace_id, [])
+        previous_risky_events = sum(
+            1 for score in history if score >= self.scoring_profile.medium_threshold
+        )
+
+        if previous_risky_events >= 2:
+            return RiskSignal(
+                code="cumulative-trace-risk",
+                category=RiskSignalCategory.BASELINE,
+                severity=RiskLevel.CRITICAL,
+                score=45,
+                confidence=0.9,
+                reason="Multiple risky actions occurred in the same trace.",
+                evidence={
+                    "trace_id_present": True,
+                    "previous_risky_events": previous_risky_events,
+                    "history_size": len(history),
+                },
+                reversible=None,
+            )
+
+        if previous_risky_events >= 1:
+            return RiskSignal(
+                code="cumulative-trace-risk",
+                category=RiskSignalCategory.BASELINE,
+                severity=RiskLevel.HIGH,
+                score=20,
+                confidence=0.85,
+                reason="Repeated risky actions are accumulating in the same trace.",
+                evidence={
+                    "trace_id_present": True,
+                    "previous_risky_events": previous_risky_events,
+                    "history_size": len(history),
+                },
+                reversible=None,
+            )
+
+        return None
+
+    def _record_trace_risk(self, context: RiskContext, risk_score: int) -> None:
+        trace_id = trace_identity(context)
+
+        if trace_id is None:
+            return
+
+        history = self._trace_risk_history[trace_id]
+        history.append(risk_score)
+
+        if len(history) > self.trace_history_limit:
+            del history[: len(history) - self.trace_history_limit]
 
     @staticmethod
     def _confidence(signals: list[RiskSignal]) -> float:
@@ -732,6 +877,39 @@ def contains_sensitive_business_target(target: str) -> bool:
     return any(
         keyword in normalized_target for keyword in ("customer", "user", "payment", "invoice")
     )
+
+
+def contains_secret_like_input(value: str) -> bool:
+    """Return true when stringified input contains credential-like material."""
+    if not value:
+        return False
+
+    return any(pattern.search(value) for pattern in InputSensitivityDetector.SECRET_PATTERNS)
+
+
+def is_external_data_movement(context: RiskContext) -> bool:
+    """Return true when a request can move data outside the local process."""
+    tool_name = context.tool_name_normalized
+    action = normalized_identifier(context.action)
+
+    if tool_name in {"external_api_send", "http_request", "webhook_send", "api_call"}:
+        return True
+
+    if action in {"send_data", "post", "put", "upload", "exfiltrate"}:
+        return True
+
+    return bool(extract_urls(context.input_text))
+
+
+def trace_identity(context: RiskContext) -> str | None:
+    """Return a stable trace/session identity for cumulative risk tracking."""
+    for key in ("trace_id", "request_id", "session_id", "run_id"):
+        value = context.metadata.get(key)
+
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    return None
 
 
 def stringify_value(value: Any) -> str:

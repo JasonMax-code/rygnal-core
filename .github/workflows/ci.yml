@@ -43,6 +43,11 @@ jobs:
       - name: Rust clippy
         run: cargo clippy --manifest-path rust-kernel/Cargo.toml -- -D warnings
 
+      - name: Install Rust kernel Python extension
+        run: |
+          cd rust-kernel
+          python -m maturin develop --release
+
       - name: Ruff lint check
         run: ruff check .
 

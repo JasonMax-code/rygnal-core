@@ -139,7 +139,7 @@ def test_credential_exfiltration_correlation_is_explicit_and_redacted() -> None:
         item for item in assessment.signals if item.code == "credential-exfiltration-attempt"
     )
     assert signal.category.value == "destination"
-    assert signal.evidence["secret_like_input"] is True
+    assert signal.evidence["sensitive_input_present"] is True
     assert secret_value not in str(signal.evidence)
     assert secret_value not in assessment.model_dump_json()
 

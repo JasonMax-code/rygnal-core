@@ -466,7 +466,7 @@ class CredentialExfiltrationCorrelationDetector:
                 confidence=0.95,
                 reason="Agent appears to send secret-like input to an external destination.",
                 evidence={
-                    "secret_like_input": True,
+                    "sensitive_input_present": True,
                     "external_destination": True,
                     "url_count": len(urls),
                     "tool_name": context.tool_name,

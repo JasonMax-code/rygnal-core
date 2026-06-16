@@ -154,3 +154,82 @@ def test_local_api_evaluate_response_redacts_secret_like_request_input():
     assert response.status_code == 200
     assert "sk-live-super-secret-token" not in response.text
     assert data["request"]["input"]["api_key"] == "[REDACTED]"
+
+
+def test_local_api_audit_events_returns_redacted_query_results(tmp_path):
+    audit_logger = AuditLogger(tmp_path / "api_audit.jsonl")
+    client = TestClient(create_app(audit_logger=audit_logger))
+
+    evaluate_response = client.post(
+        "/v1/evaluate",
+        json={
+            "tool_name": "external_api_send",
+            "action": "send_data",
+            "input": {
+                "url": "https://api.example.com/collect",
+                "api_key": "sk-live-super-secret-token",
+            },
+            "metadata": {
+                "trace_id": "trace_api_audit",
+            },
+        },
+    )
+    assert evaluate_response.status_code == 200
+
+    created_event = evaluate_response.json()["audit_event"]
+    assert created_event is not None
+
+    response = client.get(
+        "/v1/audit/events",
+        params={
+            "trace_id": created_event["trace_id"],
+            "decision": created_event["decision"],
+            "limit": 10,
+        },
+    )
+
+    data = response.json()
+
+    assert response.status_code == 200
+    assert data["returned_count"] == 1
+    assert data["total_matching"] == 1
+    assert data["limit"] == 10
+    assert data["offset"] == 0
+    assert "sk-live-super-secret-token" not in response.text
+    assert data["events"][0]["event_id"] == created_event["event_id"]
+    assert data["events"][0]["trace_id"] == created_event["trace_id"]
+    assert data["events"][0]["decision"] == created_event["decision"]
+
+
+def test_local_api_audit_events_without_logger_returns_empty_result():
+    client = TestClient(create_app())
+
+    response = client.get("/v1/audit/events")
+
+    data = response.json()
+
+    assert response.status_code == 200
+    assert data["events"] == []
+    assert data["total_scanned"] == 0
+    assert data["total_matching"] == 0
+    assert data["returned_count"] == 0
+    assert data["malformed_count"] == 0
+
+
+def test_local_api_audit_events_rejects_invalid_query_safely():
+    client = TestClient(create_app())
+
+    response = client.get(
+        "/v1/audit/events",
+        params={"limit": 999999},
+        headers={"X-Request-ID": "req_bad_audit_query"},
+    )
+
+    data = response.json()
+    body = response.text.lower()
+
+    assert response.status_code == 400
+    assert data["error"]["code"] == "audit_query_error"
+    assert data["error"]["request_id"] == "req_bad_audit_query"
+    assert data["error"]["retryable"] is False
+    assert "traceback" not in body

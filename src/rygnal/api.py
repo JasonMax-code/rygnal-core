@@ -7,13 +7,14 @@ from collections.abc import Mapping
 from typing import Any
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from rygnal.audit_logger import AuditLogger
+from rygnal.audit_query import AuditQuery, AuditQueryError, query_audit_events
 from rygnal.models import AuditEvent, PolicyDecision, ToolRequest
 from rygnal.policy_engine import PolicyEngine, load_default_policy_engine
 from rygnal.risk_engine import RiskAssessment, RiskEngine
@@ -40,6 +41,13 @@ SECRET_VALUE_PATTERNS = (
     re.compile(r"\b[A-Za-z0-9+/]{32,}={0,2}\b"),
 )
 INTERNAL_PATH_PATTERN = re.compile(r"(/workspaces/|/home/|/tmp/|[A-Za-z]:\\)")
+
+
+class _EmptyAuditSource:
+    """Read-only empty audit source used when API has no configured audit logger."""
+
+    def read_events(self) -> list[AuditEvent]:
+        return []
 
 
 class EvaluateRequest(BaseModel):
@@ -147,6 +155,51 @@ def create_app(
     @app.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok", "service": "rygnal-core"}
+
+    @app.get("/v1/audit/events", response_model=None)
+    def audit_events(
+        request: Request,
+        trace_id: str | None = None,
+        decision: str | None = None,
+        tool_name: str | None = None,
+        action: str | None = None,
+        severity: str | None = None,
+        policy_id: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        limit: int = Query(default=100, ge=0),
+        offset: int = Query(default=0, ge=0),
+        newest_first: bool = False,
+    ) -> Any:
+        audit_query = AuditQuery(
+            trace_id=trace_id,
+            decision=decision,
+            tool_name=tool_name,
+            action=action,
+            severity=severity,
+            policy_id=policy_id,
+            since=since,
+            until=until,
+            limit=limit,
+            offset=offset,
+            newest_first=newest_first,
+        )
+
+        source = active_audit_logger if active_audit_logger is not None else _EmptyAuditSource()
+
+        try:
+            result = query_audit_events(source, audit_query)
+        except AuditQueryError as exc:
+            return api_error_response(
+                request=request,
+                status_code=400,
+                code="audit_query_error",
+                message=redact_text(str(exc)),
+                retryable=False,
+                details=None,
+            )
+
+        return redact_for_api(result.to_dict())
 
     @app.post("/v1/evaluate")
     def evaluate(payload: EvaluateRequest) -> dict[str, Any]:

@@ -1,9 +1,11 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -12,6 +14,7 @@ import (
 type auditOptions struct {
 	jsonMode bool
 	noColor  bool
+	check    bool
 	last     int
 }
 
@@ -56,6 +59,7 @@ func newAuditCmd() *cobra.Command {
 		},
 	}
 	diffCmd.Flags().BoolVar(&opts.noColor, "no-color", false, "Disable ANSI diff colors")
+	diffCmd.Flags().BoolVar(&opts.check, "check", false, "Verify the saved diff can be safely applied without applying it")
 
 	cmd.AddCommand(showCmd)
 	cmd.AddCommand(diffCmd)
@@ -231,6 +235,10 @@ func runAuditDiff(cmd *cobra.Command, runID string, opts *auditOptions) error {
 		return fmt.Errorf("read review diff: %w", err)
 	}
 
+	if opts.check {
+		return runAuditDiffCheck(cmd, store, record, payload)
+	}
+
 	out := cmd.OutOrStdout()
 	fmt.Fprintf(out, "Rygnal diff: %s\n", record.RunID)
 	fmt.Fprintf(out, "Status: %s\n", valueOrDash(record.Status))
@@ -245,6 +253,74 @@ func runAuditDiff(cmd *cobra.Command, runID string, opts *auditOptions) error {
 	fmt.Fprintln(out, "Next:")
 	fmt.Fprintln(out, "  Review the red/green changes before approving or applying.")
 	return nil
+}
+
+func runAuditDiffCheck(
+	cmd *cobra.Command,
+	store localReviewStore,
+	record runReviewRecord,
+	patch []byte,
+) error {
+	out := cmd.OutOrStdout()
+
+	currentHead, err := gitOutput(store.trustedRepo, "rev-parse", "HEAD")
+	if err != nil {
+		return err
+	}
+
+	fmt.Fprintf(out, "Rygnal diff check: %s\n", record.RunID)
+	fmt.Fprintf(out, "Baseline: %s\n", shortValue(record.Baseline, 7))
+	fmt.Fprintf(out, "Current HEAD: %s\n", shortValue(currentHead, 7))
+	if record.Patch.SHA256 != "" {
+		fmt.Fprintf(out, "Patch digest: sha256:%s\n", shortValue(record.Patch.SHA256, 12))
+	}
+	fmt.Fprintln(out)
+
+	if record.Baseline != "" && currentHead != record.Baseline {
+		return fmt.Errorf(
+			"saved diff was generated from baseline %s, but current HEAD is %s",
+			shortValue(record.Baseline, 12),
+			shortValue(currentHead, 12),
+		)
+	}
+
+	status, err := gitOutput(store.trustedRepo, "status", "--porcelain")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(status) != "" {
+		return fmt.Errorf("working tree is not clean; review/apply checks require a clean repository")
+	}
+
+	applyCmd := exec.Command("git", "-C", store.trustedRepo, "apply", "--check", "--index", "-")
+	applyCmd.Stdin = bytes.NewReader(patch)
+
+	output, err := applyCmd.CombinedOutput()
+	if err != nil {
+		details := strings.TrimSpace(string(output))
+		if details == "" {
+			details = err.Error()
+		}
+		return fmt.Errorf("saved diff does not apply cleanly: %s", details)
+	}
+
+	fmt.Fprintln(out, "Status: applies cleanly")
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "No changes were applied.")
+	return nil
+}
+
+func gitOutput(repoRoot string, args ...string) (string, error) {
+	cmd := exec.Command("git", append([]string{"-C", repoRoot}, args...)...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		details := strings.TrimSpace(string(output))
+		if details == "" {
+			details = err.Error()
+		}
+		return "", fmt.Errorf("git %s failed: %s", strings.Join(args, " "), details)
+	}
+	return strings.TrimSpace(string(output)), nil
 }
 
 func localReviewStoreFromCurrentRepo() (localReviewStore, error) {

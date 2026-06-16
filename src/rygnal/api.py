@@ -22,6 +22,7 @@ from rygnal.approval_queue import (
 from rygnal.audit_logger import AuditLogger
 from rygnal.audit_query import AuditQuery, AuditQueryError, query_audit_events
 from rygnal.models import ApprovalRequest, ApprovalStatus, AuditEvent, PolicyDecision, ToolRequest
+from rygnal.patch_approval import write_patch_approval_decision_audit_event
 from rygnal.policy_engine import PolicyEngine, load_default_policy_engine
 from rygnal.risk_engine import RiskAssessment, RiskEngine
 
@@ -259,6 +260,7 @@ def create_app(
             reason=payload.reason,
             approve=True,
             approval_queue=active_approval_queue,
+            audit_logger=active_audit_logger,
         )
 
     @app.post("/v1/approvals/{approval_id}/reject", response_model=None)
@@ -274,6 +276,7 @@ def create_app(
             reason=payload.reason,
             approve=False,
             approval_queue=active_approval_queue,
+            audit_logger=active_audit_logger,
         )
 
     @app.post("/v1/evaluate")
@@ -316,6 +319,7 @@ def _decide_approval(
     reason: str,
     approve: bool,
     approval_queue: InMemoryApprovalQueue,
+    audit_logger: AuditLogger | None,
 ) -> Any:
     try:
         queued = (
@@ -359,10 +363,21 @@ def _decide_approval(
             details=None,
         )
 
+    audit_event = None
+    if audit_logger is not None and queued.decision is not None:
+        audit_event = write_patch_approval_decision_audit_event(
+            audit_logger,
+            queued.request,
+            queued.decision,
+        )
+
     return {
         "approval": redact_for_api(queued.to_dict()),
         "approval_decision": redact_for_api(
             queued.decision.model_dump(mode="json") if queued.decision is not None else None
+        ),
+        "audit_event": redact_for_api(
+            audit_event.model_dump(mode="json") if audit_event is not None else None
         ),
     }
 

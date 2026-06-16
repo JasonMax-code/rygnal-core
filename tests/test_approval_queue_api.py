@@ -2,6 +2,7 @@ from fastapi.testclient import TestClient
 
 from rygnal.api import create_app
 from rygnal.approval_queue import InMemoryApprovalQueue
+from rygnal.audit_logger import AuditLogger
 from rygnal.models import ApprovalRequest, Severity
 
 
@@ -177,3 +178,81 @@ def test_local_api_approval_queue_rejects_double_decision():
 
     assert second.status_code == 409
     assert data["error"]["code"] == "approval_state_conflict"
+
+
+def test_local_api_approval_queue_approve_writes_redacted_audit_event(tmp_path):
+    audit_logger = AuditLogger(tmp_path / "approval_api_audit.jsonl")
+    queue = InMemoryApprovalQueue()
+    request = queue.submit(make_request())
+    client = TestClient(create_app(approval_queue=queue, audit_logger=audit_logger))
+
+    response = client.post(
+        f"/v1/approvals/{request.approval_id}/approve",
+        json={
+            "decided_by": "human_reviewer",
+            "reason": "Approved with sk-live-super-secret-token after review.",
+        },
+    )
+
+    data = response.json()
+    events = audit_logger.read_events()
+
+    assert response.status_code == 200
+    assert data["audit_event"] is not None
+    assert data["audit_event"]["action"] == "approval_decided"
+    assert data["audit_event"]["decision"] == "allow"
+    assert data["audit_event"]["allowed"] is True
+    assert data["audit_event"]["metadata"]["approval_decision"]["status"] == "approved"
+    assert len(events) == 1
+    assert events[0].action == "approval_decided"
+    assert events[0].allowed is True
+    assert "sk-live-super-secret-token" not in response.text
+    assert "sk-live-super-secret-token" not in events[0].model_dump_json()
+
+
+def test_local_api_approval_queue_reject_writes_redacted_audit_event(tmp_path):
+    audit_logger = AuditLogger(tmp_path / "approval_api_audit.jsonl")
+    queue = InMemoryApprovalQueue()
+    request = queue.submit(make_request())
+    client = TestClient(create_app(approval_queue=queue, audit_logger=audit_logger))
+
+    response = client.post(
+        f"/v1/approvals/{request.approval_id}/reject",
+        json={
+            "decided_by": "human_reviewer",
+            "reason": "Rejected with sk-live-super-secret-token after review.",
+        },
+    )
+
+    data = response.json()
+    events = audit_logger.read_events()
+
+    assert response.status_code == 200
+    assert data["audit_event"] is not None
+    assert data["audit_event"]["action"] == "approval_decided"
+    assert data["audit_event"]["decision"] == "block"
+    assert data["audit_event"]["allowed"] is False
+    assert data["audit_event"]["metadata"]["approval_decision"]["status"] == "rejected"
+    assert len(events) == 1
+    assert events[0].action == "approval_decided"
+    assert events[0].allowed is False
+    assert "sk-live-super-secret-token" not in response.text
+    assert "sk-live-super-secret-token" not in events[0].model_dump_json()
+
+
+def test_local_api_approval_queue_denied_self_approval_does_not_write_audit_event(tmp_path):
+    audit_logger = AuditLogger(tmp_path / "approval_api_audit.jsonl")
+    queue = InMemoryApprovalQueue()
+    request = queue.submit(make_request(requested_by="agent_user"))
+    client = TestClient(create_app(approval_queue=queue, audit_logger=audit_logger))
+
+    response = client.post(
+        f"/v1/approvals/{request.approval_id}/approve",
+        json={
+            "decided_by": "agent_user",
+            "reason": "Trying to approve my own request.",
+        },
+    )
+
+    assert response.status_code == 403
+    assert audit_logger.read_events() == []

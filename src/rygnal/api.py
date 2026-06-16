@@ -13,9 +13,15 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from rygnal.approval_queue import (
+    ApprovalDeniedError,
+    ApprovalNotFoundError,
+    ApprovalStateConflictError,
+    InMemoryApprovalQueue,
+)
 from rygnal.audit_logger import AuditLogger
 from rygnal.audit_query import AuditQuery, AuditQueryError, query_audit_events
-from rygnal.models import AuditEvent, PolicyDecision, ToolRequest
+from rygnal.models import ApprovalRequest, ApprovalStatus, AuditEvent, PolicyDecision, ToolRequest
 from rygnal.policy_engine import PolicyEngine, load_default_policy_engine
 from rygnal.risk_engine import RiskAssessment, RiskEngine
 
@@ -41,6 +47,13 @@ SECRET_VALUE_PATTERNS = (
     re.compile(r"\b[A-Za-z0-9+/]{32,}={0,2}\b"),
 )
 INTERNAL_PATH_PATTERN = re.compile(r"(/workspaces/|/home/|/tmp/|[A-Za-z]:\\)")
+
+
+class ApprovalDecisionRequest(BaseModel):
+    """Request body for approval queue approve/reject actions."""
+
+    decided_by: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
 
 
 class _EmptyAuditSource:
@@ -81,6 +94,7 @@ def create_app(
     policy_engine: PolicyEngine | None = None,
     risk_engine: RiskEngine | None = None,
     audit_logger: AuditLogger | None = None,
+    approval_queue: InMemoryApprovalQueue | None = None,
 ) -> FastAPI:
     """Create the local Rygnal FastAPI app."""
     app = FastAPI(
@@ -92,6 +106,7 @@ def create_app(
     active_policy_engine = policy_engine or load_default_policy_engine()
     active_risk_engine = risk_engine or RiskEngine()
     active_audit_logger = audit_logger
+    active_approval_queue = approval_queue or InMemoryApprovalQueue()
 
     @app.middleware("http")
     async def attach_request_id(request: Request, call_next):  # type: ignore[no-untyped-def]
@@ -201,6 +216,66 @@ def create_app(
 
         return redact_for_api(result.to_dict())
 
+    @app.post("/v1/approvals", status_code=201, response_model=None)
+    def create_approval(payload: ApprovalRequest) -> dict[str, Any]:
+        approval_request = active_approval_queue.submit(payload)
+        queued = active_approval_queue.get(approval_request.approval_id)
+        return {"approval": redact_for_api(queued.to_dict())}
+
+    @app.get("/v1/approvals", response_model=None)
+    def list_approvals(status: ApprovalStatus | None = None) -> dict[str, Any]:
+        approvals = tuple(item.to_dict() for item in active_approval_queue.list(status=status))
+        return {
+            "approvals": redact_for_api(approvals),
+            "returned_count": len(approvals),
+        }
+
+    @app.get("/v1/approvals/{approval_id}", response_model=None)
+    def get_approval(request: Request, approval_id: str) -> Any:
+        try:
+            queued = active_approval_queue.get(approval_id)
+        except ApprovalNotFoundError as exc:
+            return api_error_response(
+                request=request,
+                status_code=404,
+                code="approval_not_found",
+                message=redact_text(str(exc)),
+                retryable=False,
+                details=None,
+            )
+
+        return {"approval": redact_for_api(queued.to_dict())}
+
+    @app.post("/v1/approvals/{approval_id}/approve", response_model=None)
+    def approve_approval(
+        request: Request,
+        approval_id: str,
+        payload: ApprovalDecisionRequest,
+    ) -> Any:
+        return _decide_approval(
+            request=request,
+            approval_id=approval_id,
+            decided_by=payload.decided_by,
+            reason=payload.reason,
+            approve=True,
+            approval_queue=active_approval_queue,
+        )
+
+    @app.post("/v1/approvals/{approval_id}/reject", response_model=None)
+    def reject_approval(
+        request: Request,
+        approval_id: str,
+        payload: ApprovalDecisionRequest,
+    ) -> Any:
+        return _decide_approval(
+            request=request,
+            approval_id=approval_id,
+            decided_by=payload.decided_by,
+            reason=payload.reason,
+            approve=False,
+            approval_queue=active_approval_queue,
+        )
+
     @app.post("/v1/evaluate")
     def evaluate(payload: EvaluateRequest) -> dict[str, Any]:
         request = payload.to_tool_request()
@@ -231,6 +306,65 @@ def create_app(
         )
 
     return app
+
+
+def _decide_approval(
+    *,
+    request: Request,
+    approval_id: str,
+    decided_by: str,
+    reason: str,
+    approve: bool,
+    approval_queue: InMemoryApprovalQueue,
+) -> Any:
+    try:
+        queued = (
+            approval_queue.approve(
+                approval_id,
+                decided_by=decided_by,
+                reason=reason,
+            )
+            if approve
+            else approval_queue.reject(
+                approval_id,
+                decided_by=decided_by,
+                reason=reason,
+            )
+        )
+    except ApprovalNotFoundError as exc:
+        return api_error_response(
+            request=request,
+            status_code=404,
+            code="approval_not_found",
+            message=redact_text(str(exc)),
+            retryable=False,
+            details=None,
+        )
+    except ApprovalDeniedError as exc:
+        return api_error_response(
+            request=request,
+            status_code=403,
+            code="approval_denied",
+            message=redact_text(str(exc)),
+            retryable=False,
+            details=None,
+        )
+    except ApprovalStateConflictError as exc:
+        return api_error_response(
+            request=request,
+            status_code=409,
+            code="approval_state_conflict",
+            message=redact_text(str(exc)),
+            retryable=False,
+            details=None,
+        )
+
+    return {
+        "approval": redact_for_api(queued.to_dict()),
+        "approval_decision": redact_for_api(
+            queued.decision.model_dump(mode="json") if queued.decision is not None else None
+        ),
+    }
 
 
 def api_error_response(

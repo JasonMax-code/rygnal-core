@@ -50,4 +50,3 @@ rules:
     decision: require_approval
     severity: high
     reason: "Unknown or unmatched actions require human approval in production-safe mode."
-

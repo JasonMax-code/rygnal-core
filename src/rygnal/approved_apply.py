@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from functools import cached_property
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 from rygnal.audit_logger import AuditLogger
@@ -40,6 +41,10 @@ class ApprovedPatchApplyError(RuntimeError):
 
 class ApprovedPatchApplyOutcome(StrEnum):
     APPLIED = "applied"
+
+
+_USED_PATCH_APPROVALS: set[tuple[str, str, str]] = set()
+_USED_PATCH_APPROVALS_LOCK = Lock()
 
 
 @dataclass(frozen=True)
@@ -124,8 +129,16 @@ def apply_approved_patch(
     _validate_request_for_apply(approval_request)
     _ensure_clean_repo(target_repo)
     _ensure_target_at_baseline(target_repo, patch_diff.baseline_commit_sha)
-    _check_patch_applies(target_repo, patch_diff.patch)
-    _apply_patch(target_repo, patch_diff.patch)
+
+    approval_use_key = _approval_use_key(approval_request, patch_diff)
+    _ensure_approval_not_previously_applied(logger, approval_use_key)
+    _reserve_approval_use(approval_use_key)
+    try:
+        _check_patch_applies(target_repo, patch_diff.patch)
+        _apply_patch(target_repo, patch_diff.patch)
+    except Exception:
+        _release_approval_use(approval_use_key)
+        raise
 
     result = ApprovedPatchApplyResult(
         outcome=ApprovedPatchApplyOutcome.APPLIED,
@@ -179,6 +192,51 @@ def write_approved_patch_apply_audit_event(
     )
 
     return logger.log_decision(request, decision, metadata=result.audit_summary)
+
+
+def _approval_use_key(
+    approval_request: ApprovalRequest,
+    patch_diff: PatchDiff,
+) -> tuple[str, str, str]:
+    return (
+        approval_request.approval_id,
+        patch_diff.patch_sha256,
+        patch_diff.baseline_commit_sha,
+    )
+
+
+def _reserve_approval_use(key: tuple[str, str, str]) -> None:
+    with _USED_PATCH_APPROVALS_LOCK:
+        if key in _USED_PATCH_APPROVALS:
+            raise ApprovedPatchApplyError("Approval has already been used for this guarded patch.")
+        _USED_PATCH_APPROVALS.add(key)
+
+
+def _release_approval_use(key: tuple[str, str, str]) -> None:
+    with _USED_PATCH_APPROVALS_LOCK:
+        _USED_PATCH_APPROVALS.discard(key)
+
+
+def _ensure_approval_not_previously_applied(
+    logger: AuditLogger | None,
+    key: tuple[str, str, str],
+) -> None:
+    if logger is None:
+        return
+
+    approval_id, patch_sha256, baseline_commit_sha = key
+
+    for event in logger.read_events():
+        if event.policy_id != "guarded-workspace-approved-patch-apply":
+            continue
+
+        metadata = event.metadata
+        if (
+            metadata.get("approval_id") == approval_id
+            and metadata.get("patch_sha256") == patch_sha256
+            and metadata.get("baseline_commit_sha") == baseline_commit_sha
+        ):
+            raise ApprovedPatchApplyError("Approval has already been used for this guarded patch.")
 
 
 def _validate_request_for_apply(approval_request: ApprovalRequest) -> None:

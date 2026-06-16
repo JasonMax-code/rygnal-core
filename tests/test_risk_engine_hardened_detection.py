@@ -116,3 +116,106 @@ def test_cross_signal_correlation_escalates_sensitive_production_delete() -> Non
     assert assessment.risk_level == RiskLevel.CRITICAL
     assert assessment.risk_score >= 85
     assert "compound-risk-escalation" in signal_codes(assessment)
+
+
+def test_credential_exfiltration_correlation_is_explicit_and_redacted() -> None:
+    secret_value = "sk-live-super-secret-token-123456"
+    assessment = RiskEngine().assess(
+        ToolRequest(
+            tool_name="external_api_send",
+            action="send_data",
+            input={
+                "url": "https://api.example.com/collect",
+                "payload": {"api_key": secret_value},
+            },
+        )
+    )
+
+    assert assessment.risk_level == RiskLevel.CRITICAL
+    assert assessment.risk_score == 100
+    assert "credential-exfiltration-attempt" in signal_codes(assessment)
+
+    signal = next(
+        item for item in assessment.signals if item.code == "credential-exfiltration-attempt"
+    )
+    assert signal.category.value == "destination"
+    assert signal.evidence["sensitive_input_present"] is True
+    assert secret_value not in str(signal.evidence)
+    assert secret_value not in assessment.model_dump_json()
+
+
+@pytest.mark.parametrize("environment", ["ci", "staging", "shared", "prod"])
+def test_non_local_environments_amplify_risk(environment: str) -> None:
+    assessment = RiskEngine().assess(
+        ToolRequest(
+            tool_name="file_write",
+            action="write_file",
+            target="config/app.yml",
+            input="debug: true",
+            environment=environment,
+        )
+    )
+
+    assert assessment.risk_score >= 30
+    assert assessment.risk_level in {RiskLevel.MEDIUM, RiskLevel.HIGH, RiskLevel.CRITICAL}
+    assert "non-local-environment" in signal_codes(assessment)
+
+
+def test_trace_cumulative_risk_escalates_repeated_medium_risk_actions() -> None:
+    engine = RiskEngine()
+
+    trace_id = "trace_repeated_risk"
+
+    first = engine.assess(
+        ToolRequest(
+            tool_name="database_read",
+            action="select",
+            target="analytics_snapshot",
+            metadata={"trace_id": trace_id},
+        )
+    )
+    second = engine.assess(
+        ToolRequest(
+            tool_name="database_read",
+            action="select",
+            target="feature_flags",
+            metadata={"trace_id": trace_id},
+        )
+    )
+    third = engine.assess(
+        ToolRequest(
+            tool_name="database_read",
+            action="select",
+            target="debug_metrics",
+            metadata={"trace_id": trace_id},
+        )
+    )
+
+    assert first.risk_level == RiskLevel.MEDIUM
+    assert second.risk_level == RiskLevel.HIGH
+    assert third.risk_level == RiskLevel.CRITICAL
+    assert "cumulative-trace-risk" in signal_codes(third)
+
+
+def test_trace_risk_isolated_by_trace_id() -> None:
+    engine = RiskEngine()
+
+    first = engine.assess(
+        ToolRequest(
+            tool_name="database_read",
+            action="select",
+            target="analytics_snapshot",
+            metadata={"trace_id": "trace_a"},
+        )
+    )
+    second = engine.assess(
+        ToolRequest(
+            tool_name="database_read",
+            action="select",
+            target="analytics_snapshot",
+            metadata={"trace_id": "trace_b"},
+        )
+    )
+
+    assert "cumulative-trace-risk" not in signal_codes(first)
+    assert "cumulative-trace-risk" not in signal_codes(second)

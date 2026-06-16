@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+import rygnal.approved_apply as approved_apply_module
 from rygnal.approved_apply import ApprovedPatchApplyError, apply_approved_patch
 from rygnal.audit_logger import AuditLogger
 from rygnal.models import (
@@ -293,3 +294,75 @@ def test_non_repo_target_rejects(tmp_path: Path) -> None:
             approval_request=request,
             approval_decision=decision,
         )
+
+
+def test_reused_approval_is_rejected_before_second_apply(tmp_path: Path) -> None:
+    guarded, trusted = clone_fixture(tmp_path)
+    second_trusted = tmp_path / "second_trusted"
+    shutil.copytree(trusted, second_trusted)
+
+    patch = make_source_patch(guarded)
+    request = create_patch_approval_request(patch, requested_by="test_user")
+    decision = approve_patch_request(
+        request,
+        decided_by="reviewer",
+        patch_sha256=patch.patch_sha256,
+    )
+
+    first_result = apply_approved_patch(
+        patch,
+        trusted,
+        approval_request=request,
+        approval_decision=decision,
+    )
+
+    assert first_result.applied is True
+
+    with pytest.raises(ApprovedPatchApplyError, match="already been used|reused"):
+        apply_approved_patch(
+            patch,
+            second_trusted,
+            approval_request=request,
+            approval_decision=decision,
+        )
+
+    assert not (second_trusted / "src" / "app.py").exists()
+
+
+def test_reused_approval_is_rejected_from_audit_history_after_restart(
+    tmp_path: Path,
+) -> None:
+    guarded, trusted = clone_fixture(tmp_path)
+    second_trusted = tmp_path / "second_trusted"
+    shutil.copytree(trusted, second_trusted)
+
+    patch = make_source_patch(guarded)
+    request = create_patch_approval_request(patch, requested_by="test_user")
+    decision = approve_patch_request(
+        request,
+        decided_by="reviewer",
+        patch_sha256=patch.patch_sha256,
+    )
+    logger = AuditLogger(tmp_path / "audit.jsonl")
+
+    first_result = apply_approved_patch(
+        patch,
+        trusted,
+        approval_request=request,
+        approval_decision=decision,
+        logger=logger,
+    )
+    assert first_result.applied is True
+
+    approved_apply_module._USED_PATCH_APPROVALS.clear()
+
+    with pytest.raises(ApprovedPatchApplyError, match="already been used|reused"):
+        apply_approved_patch(
+            patch,
+            second_trusted,
+            approval_request=request,
+            approval_decision=decision,
+            logger=logger,
+        )
+
+    assert not (second_trusted / "src" / "app.py").exists()

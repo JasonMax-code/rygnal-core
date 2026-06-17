@@ -108,7 +108,7 @@ func runAuditList(cmd *cobra.Command, opts *auditOptions) error {
 
 	fmt.Fprintln(out, "Rygnal audit")
 	fmt.Fprintln(out)
-	fmt.Fprintf(out, "%-14s  %-18s  %-8s  %-5s  %s\n", "RUN", "STATUS", "RISK", "FILES", "PATCH")
+	fmt.Fprintf(out, "%-14s  %-18s  %-8s  %-5s  %-12s  %s\n", "RUN", "STATUS", "RISK", "FILES", "APPLY", "PATCH")
 	for _, record := range records[:limit] {
 		risk := record.Risk.Level
 		if risk == "" {
@@ -120,13 +120,19 @@ func runAuditList(cmd *cobra.Command, opts *auditOptions) error {
 			patch = shortValue(record.Patch.SHA256, 12)
 		}
 
+		applyStatus := "not_applied"
+		if record.Apply != nil {
+			applyStatus = record.Apply.Status
+		}
+
 		fmt.Fprintf(
 			out,
-			"%-14s  %-18s  %-8s  %-5d  %s\n",
+			"%-14s  %-18s  %-8s  %-5d  %-12s  %s\n",
 			shortValue(record.RunID, 14),
 			valueOrDash(record.Status),
 			risk,
 			record.Changes.ChangedFileCount,
+			applyStatus,
 			patch,
 		)
 	}
@@ -196,6 +202,7 @@ func renderRunReviewSummary(cmd *cobra.Command, record runReviewRecord) {
 		fmt.Fprintf(out, "Blocked reason: %s\n", data.BlockedReason)
 	}
 
+	renderApplyDecision(out, record)
 	renderWarnings(out, record.Warnings)
 
 	fmt.Fprintln(out)
@@ -209,6 +216,26 @@ func renderRunReviewSummary(cmd *cobra.Command, record runReviewRecord) {
 	} else {
 		fmt.Fprintln(out, "  rygnal audit")
 	}
+}
+
+func renderApplyDecision(out interface{ Write([]byte) (int, error) }, record runReviewRecord) {
+	if record.Apply == nil {
+		fmt.Fprintln(out, "Applied: no")
+		return
+	}
+
+	fmt.Fprintln(out, "Applied: yes")
+	fmt.Fprintf(out, "Apply status: %s\n", record.Apply.Status)
+	if record.Apply.AppliedAt != "" {
+		fmt.Fprintf(out, "Applied at: %s\n", record.Apply.AppliedAt)
+	}
+	if record.Apply.AppliedFromHEAD != "" {
+		fmt.Fprintf(out, "Applied from HEAD: %s\n", shortValue(record.Apply.AppliedFromHEAD, 12))
+	}
+	if record.Apply.PatchSHA256 != "" {
+		fmt.Fprintf(out, "Applied patch digest: sha256:%s\n", shortValue(record.Apply.PatchSHA256, 12))
+	}
+	fmt.Fprintf(out, "Staged: %s\n", yesNo(record.Apply.Staged))
 }
 
 func runAuditDiff(cmd *cobra.Command, runID string, opts *auditOptions) error {
@@ -244,6 +271,9 @@ func runAuditDiff(cmd *cobra.Command, runID string, opts *auditOptions) error {
 	fmt.Fprintf(out, "Status: %s\n", valueOrDash(record.Status))
 	if record.Risk.Level != "" {
 		fmt.Fprintf(out, "Risk: %s\n", record.Risk.Level)
+	}
+	if record.Apply != nil {
+		fmt.Fprintf(out, "Apply: %s\n", record.Apply.Status)
 	}
 	fmt.Fprintln(out)
 

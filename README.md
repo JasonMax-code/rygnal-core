@@ -1,108 +1,117 @@
-# Rygnal Core
 
-Rygnal Core is a local-first core MVP for runtime governance of AI-agent tool actions. It is not a full SaaS product, enterprise deployment, or enterprise production-ready platform. It is not enterprise production-ready.
+<div align="center">
+  <table style="border: none; border-collapse: collapse; background: transparent; margin: 40px 0 16px 0;">
+    <tr style="border: none; background: transparent;">
+      <!-- Industrial Terminal Icon -->
+      <td style="border: none; padding: 0 14px 0 0; vertical-align: middle;">
+        <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#46e12a" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="4 17 10 11 4 5"></polyline>
+          <line x1="12" y1="19" x2="20" y2="19"></line>
+        </svg>
+      </td>
+      <!-- Big Coding Style Terminal Text -->
+      <td style="border: none; padding: 0; vertical-align: middle; white-space: nowrap;">
+        <h1 style="border: none; margin: 0; padding: 0; font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, Courier, monospace; font-size: 34px; font-weight: 800; color: #46e12a; letter-spacing: -0.04em; text-transform: uppercase;">
+          The OS-Level Safety Kernel for AI Agents.
+        </h1>
+      </td>
+    </tr>
+  </table>
+</div>
 
-## What Works Today
 
-- Policy Engine v1/v2 schema
-- Risk Engine v1
-- Audit Logger v1
-- Runtime Interceptor v1
-- Approval Workflow v1
-- Runtime Modes v1
-- Real Scenario Runner v1
-- Rygnal CLI v1
-- Policy explain output
-- Security hardening
-- Docker setup
-- CI validation
 
-## What is Not Included Yet
+<p align="center">
+  <a href="https://github.com/Rygnal/rygnal-core">
+    <img src="https://img.shields.io/badge/core-rygnal--core-black?style=flat-square" alt="rygnal-core" />
+  </a>
+  <img src="https://img.shields.io/badge/status-early--MVP-orange?style=flat-square" alt="status" />
+  <img src="https://img.shields.io/badge/approach-local--first-blue?style=flat-square" alt="local-first" />
+  <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="license" />
+</p>
 
-- SaaS dashboard
-- Login/auth system
-- Billing
-- Multi-tenant workspaces
-- Enterprise SSO
-- SIEM export
-- Cloud deployment
+---
 
-## Install Locally
+## $$\Large\color{#46e12a}\texttt{What Rygnal builds}$$
 
-Create and activate a virtual environment:
+Rygnal is an **OS-level safety kernel** for AI coding agents that intercepts and blocks destructive file changes in milliseconds.
 
-    python -m venv .venv
-    source .venv/bin/activate
+It mathematically protects your human-written code, allowing you to safely run autonomous agents unattended without risking your repository.
 
-Install development dependencies:
 
-    make install
+| Capability | What it does |
+| :--- | :--- |
+| <code style="color: #4ec9b0;">🛡️ Invisible PTY Interception</code> | Pauses risky actions inline with `[Y/N]`, keeping terminal UI intact. |
+| <code style="color: #4ec9b0;">📦 Isolated Git Sandboxing</code> | Traps the agent in a hidden worktree to test changes first. |
+| <code style="color: #4ec9b0;">🦀 Rust Semantic Engine</code> | Scores structural AST diffs and temporal decay in `<100ms`. |
+| <code style="color: #4ec9b0;">📝 Declarative Guardrails</code> | Shields critical files instantly using a `.rygnal.yaml` list. |
+| <code style="color: #4ec9b0;">📋 Deterministic Audit</code> | Writes immutable `.jsonl` logs for every intercepted patch. |
 
-Install Rygnal Core in editable mode:
 
-    pip install -e .
 
-Verify the package import:
+---
 
-    python -c "from rygnal import Rygnal; assert Rygnal is not None; print('Rygnal import OK')"
+## $$\Large\color{#46e12a}\texttt{Design Principles}$$
 
-Verify the CLI:
+| Design Principle | Core Mechanism | Technical Implementation |
+| :--- | :--- | :--- |
+| <div style="display: flex; align-items: center; gap: 8px; font-weight: 600; color: #4ec9b0;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg> Invisible by Default</div> | Zero manual setup | Keeps the developer in their natural terminal flow. The agent remains entirely native until a security boundary is crossed. |
+| <div style="display: flex; align-items: center; gap: 8px; font-weight: 600; color: #4ec9b0;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 9.9-1"></path></svg> Zero-Trust Execution</div> | Out-of-process isolation | Denies agents direct write access to the live repository. All file modifications occur within a hidden, deterministic sandbox. |
+| <div style="display: flex; align-items: center; gap: 8px; font-weight: 600; color: #4ec9b0;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg> Human Context Paramount</div> | Effort-based prioritization | Uses temporal decay formulas and Git history to mathematically protect recently authored human code from AI destruction. |
+| <div style="display: flex; align-items: center; gap: 8px; font-weight: 600; color: #4ec9b0;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 4 15 12 5 20 5 4"></polygon><line x1="19" y1="5" x2="19" y2="19"></line></svg> Graceful Interception</div> | Inline runtime pausing | Pauses the terminal stream for live human approval, or injects safe system errors so unattended LLMs can self-correct without crashing. |
+| <div style="display: flex; align-items: center; gap: 8px; font-weight: 600; color: #4ec9b0;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg> Immutable Transparency</div> | Continuous audit logging | Records every AI action, risk score, and system decision to a local, machine-readable `.rygnal/audit.jsonl` state file. |
 
-    rygnal --help
-    rygnal version
 
-Run the demo through the package CLI:
+---
 
-    rygnal demo run
+<!-- START OF INDUSTRIAL FOOTER SECTION -->
+<br />
+<hr style="border: 0; height: 1px; background: linear-gradient(to right, rgba(0,0,0,0), #6366f1, #06b6d4, rgba(0,0,0,0)); margin: 40px 0;" />
 
-Run the original module demo:
+<div align="center">
+  <table style="border: none; border-collapse: collapse; background: transparent; width: 100%; max-width: 650px;">
+    <tr>
+      <!-- Open Source / Contributing Column -->
+      <td style="border: none; padding: 20px; width: 50%; vertical-align: top; text-align: left;">
+        <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 12px;">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#6366f1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+          </svg>
+          <span style="font-weight: 700; font-size: 16px; letter-spacing: -0.02em; color: #f3f4f6;">Contributing</span>
+        </div>
+        <p style="margin: 0; font-size: 14px; line-height: 1.6; color: #9ca3af;">
+          We welcome bug reports, architecture discussions, and focused pull requests. Review our <a href="./../CONTRIBUTING.md" style="color: #06b6d4; text-decoration: none; font-weight: 500;">Contribution Guidelines &rarr;</a> to get started.
+        </p>
+      </td>
+      <!-- Separator Line -->
+      <td style="border: none; width: 1px; padding: 0;">
+        <div style="width: 1px; height: 100px; background: linear-gradient(to bottom, rgba(0,0,0,0), #374151, rgba(0,0,0,0));"></div>
+      </td>
+      <!-- System Architecture Ecosystem Column -->
+      <td style="border: none; padding: 20px; width: 50%; vertical-align: top; text-align: left;">
+        <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 12px;">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#6366f1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M16 16v1a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h11a2 2 0 0 1 2 2v1"/>
+            <path d="M18 8h4a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-4"/>
+            <circle cx="8" cy="12" r="2"/>
+          </svg>
+          <span style="font-weight: 700; font-size: 16px; letter-spacing: -0.02em; color: #f3f4f6;">Ecosystem</span>
+        </div>
+        <p style="margin: 0; font-size: 14px; line-height: 1.6; color: #9ca3af;">
+          Designed to seamlessly drop into production environments, CI/CD pipelines, and runtime execution layers without local friction.
+        </p>
+      </td>
+    </tr>
+  </table>
 
-    python -m demo.run_demo
+  <!-- Engineered Badge Subtext -->
+  <div style="margin-top: 48px; display: inline-flex; align-items: center; gap: 8px; background: linear-gradient(135deg, rgba(99, 102, 241, 0.08), rgba(6, 182, 212, 0.08)); border: 1px solid rgba(99, 102, 241, 0.2); padding: 6px 14px; border-radius: 100px;">
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#06b6d4" stroke-width="2.5">
+      <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+      <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+    </svg>
+    <span style="font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: #06b6d4;">Built for safer AI-agent systems</span>
+  </div>
+</div>
+<!-- END OF INDUSTRIAL FOOTER SECTION -->
 
-Run validation:
-
-    make validate
-
-## Run with Docker
-
-    docker compose build
-    docker compose run --rm rygnal python -m demo.run_demo
-
-## Validation
-
-    ruff format src tests demo examples
-    ruff check src tests demo examples
-    pytest -q
-    bandit -r src demo examples -c pyproject.toml
-    pip-audit -r requirements-dev.txt
-    python -m demo.run_demo
-
-## License
-
-Private repository. No public license selected yet.
-
-## Local Validation Environment
-
-Use a virtual environment for local validation. Some systems block installing packages into the system Python environment, so contributors should avoid relying on global Python installs.
-
-Recommended setup:
-
-    python -m venv .venv
-    source .venv/bin/activate
-    make install-dev
-
-Check that the editable package and CLI are available:
-
-    make check-install
-
-Run normal validation:
-
-    make validate
-
-Run validation plus package/CLI install checks:
-
-    make validate-local
-
-Dependency audit is included in validation:
-
-    pip-audit -r requirements-dev.txt

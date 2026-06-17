@@ -90,6 +90,34 @@ class EvaluateRequest(BaseModel):
         )
 
 
+def _query_audit_events_response(
+    *,
+    request: Request,
+    audit_query: AuditQuery,
+    verify_integrity: bool,
+    active_audit_logger: AuditLogger | None,
+) -> Any:
+    source = active_audit_logger if active_audit_logger is not None else _EmptyAuditSource()
+
+    try:
+        result = query_audit_events(
+            source,
+            audit_query,
+            verify_integrity=verify_integrity,
+        )
+    except AuditQueryError as exc:
+        return api_error_response(
+            request=request,
+            status_code=400,
+            code="audit_query_error",
+            message=redact_text(str(exc)),
+            retryable=False,
+            details=None,
+        )
+
+    return redact_for_api(result.to_dict())
+
+
 def create_app(
     *,
     policy_engine: PolicyEngine | None = None,
@@ -175,6 +203,7 @@ def create_app(
     @app.get("/v1/audit/events", response_model=None)
     def audit_events(
         request: Request,
+        event_id: str | None = None,
         trace_id: str | None = None,
         decision: str | None = None,
         tool_name: str | None = None,
@@ -186,8 +215,10 @@ def create_app(
         limit: int = Query(default=100, ge=0),
         offset: int = Query(default=0, ge=0),
         newest_first: bool = False,
+        verify_integrity: bool = False,
     ) -> Any:
         audit_query = AuditQuery(
+            event_id=event_id,
             trace_id=trace_id,
             decision=decision,
             tool_name=tool_name,
@@ -201,21 +232,40 @@ def create_app(
             newest_first=newest_first,
         )
 
-        source = active_audit_logger if active_audit_logger is not None else _EmptyAuditSource()
+        return _query_audit_events_response(
+            request=request,
+            audit_query=audit_query,
+            verify_integrity=verify_integrity,
+            active_audit_logger=active_audit_logger,
+        )
 
-        try:
-            result = query_audit_events(source, audit_query)
-        except AuditQueryError as exc:
+    @app.get("/v1/audit/events/{event_id}", response_model=None)
+    def audit_event_by_id(
+        request: Request,
+        event_id: str,
+        verify_integrity: bool = False,
+    ) -> Any:
+        result = _query_audit_events_response(
+            request=request,
+            audit_query=AuditQuery(event_id=event_id, limit=1),
+            verify_integrity=verify_integrity,
+            active_audit_logger=active_audit_logger,
+        )
+
+        if isinstance(result, JSONResponse):
+            return result
+
+        if result.get("returned_count") == 0:
             return api_error_response(
                 request=request,
-                status_code=400,
-                code="audit_query_error",
-                message=redact_text(str(exc)),
+                status_code=404,
+                code="audit_event_not_found",
+                message="Audit event not found.",
                 retryable=False,
-                details=None,
+                details={"event_id": redact_text(event_id)},
             )
 
-        return redact_for_api(result.to_dict())
+        return {"event": result["events"][0], "integrity_verified": result["integrity_verified"]}
 
     @app.post("/v1/approvals", status_code=201, response_model=None)
     def create_approval(payload: ApprovalRequest) -> dict[str, Any]:

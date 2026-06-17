@@ -236,12 +236,16 @@ def test_query_audit_events_enforces_limit_bounds(tmp_path: Path) -> None:
         policy_id=None,
     )
 
+    oversized = query_audit_events(logger.log_path, AuditQuery(limit=10_000))
+    assert oversized.limit == 500
+    assert oversized.returned_count == 1
+
     try:
-        query_audit_events(logger.log_path, AuditQuery(limit=10_000))
+        query_audit_events(logger.log_path, AuditQuery(limit=-1))
     except AuditQueryError as exc:
         assert "limit" in str(exc)
     else:
-        raise AssertionError("Expected oversized limit to fail")
+        raise AssertionError("Expected negative limit to fail")
 
 
 def test_audit_query_public_exports_are_lazy_importable() -> None:

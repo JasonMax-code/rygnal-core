@@ -51,6 +51,7 @@ type runReviewRecord struct {
 	PatchPath      string                        `json:"-"`
 	SummaryPath    string                        `json:"-"`
 	PatchDigest    string                        `json:"patch_digest,omitempty"`
+	Apply          *localApplyRecord             `json:"apply,omitempty"`
 	ArtifactSchema string                        `json:"artifact_schema"`
 }
 
@@ -231,6 +232,10 @@ func listRunReviewRecords(store localReviewStore) ([]runReviewRecord, error) {
 			}
 		}
 
+		if applyRecord, err := readLocalApplyRecord(filepath.Join(store.runsDir, entry.Name(), applyRecordFileName)); err == nil {
+			record.Apply = &applyRecord
+		}
+
 		records = append(records, record)
 	}
 
@@ -253,6 +258,20 @@ func readRunReviewRecord(path string) (runReviewRecord, error) {
 	var record runReviewRecord
 	if err := json.Unmarshal(payload, &record); err != nil {
 		return runReviewRecord{}, fmt.Errorf("decode run review summary %s: %w", path, err)
+	}
+
+	return record, nil
+}
+
+func readLocalApplyRecord(path string) (localApplyRecord, error) {
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		return localApplyRecord{}, err
+	}
+
+	var record localApplyRecord
+	if err := json.Unmarshal(payload, &record); err != nil {
+		return localApplyRecord{}, fmt.Errorf("decode apply record %s: %w", path, err)
 	}
 
 	return record, nil

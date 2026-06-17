@@ -1,11 +1,14 @@
 mod ast;
 mod models;
+mod path_safety;
 mod subjective;
 
 use crate::models::{AgentAction, GitPatch, RiskAssessment, SubjectiveRiskInput};
+use crate::path_safety::{PathSensitivity, PathValidationOutcome};
 use crate::subjective::evaluate_subjective_risk as evaluate_subjective_risk_inner;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use tree_sitter::Parser;
 
 #[pyfunction]
@@ -14,6 +17,63 @@ fn verify_bridge(payload: String) -> PyResult<String> {
         "[Rust Kernel]: Connection secure. Received payload -> {}",
         payload
     ))
+}
+
+#[pyfunction]
+fn engine_version() -> PyResult<String> {
+    Ok(path_safety::engine_version().to_string())
+}
+
+#[pyfunction]
+fn validate_repo_relative_path(py: Python<'_>, path: String) -> PyResult<PyObject> {
+    path_validation_outcome_to_python(py, path_safety::check_repo_relative_path(&path))
+}
+
+#[pyfunction]
+fn validate_patch_path(py: Python<'_>, path: String) -> PyResult<PyObject> {
+    path_validation_outcome_to_python(py, path_safety::check_patch_path(&path))
+}
+
+#[pyfunction]
+fn classify_path_sensitivity(py: Python<'_>, path: String) -> PyResult<PyObject> {
+    match path_safety::classify_path_sensitivity(&path) {
+        Ok(sensitivity) => path_sensitivity_to_python(py, sensitivity),
+        Err(err) => Err(PyValueError::new_err(format!("{}: {}", err.code(), err))),
+    }
+}
+
+fn path_validation_outcome_to_python(
+    py: Python<'_>,
+    outcome: PathValidationOutcome,
+) -> PyResult<PyObject> {
+    let dict = PyDict::new(py);
+
+    dict.set_item("safe", outcome.safe)?;
+    match outcome.normalized_path {
+        Some(path) => dict.set_item("normalized_path", path)?,
+        None => dict.set_item("normalized_path", py.None())?,
+    }
+    match outcome.error_code {
+        Some(code) => dict.set_item("error_code", code)?,
+        None => dict.set_item("error_code", py.None())?,
+    }
+    match outcome.reason {
+        Some(reason) => dict.set_item("reason", reason)?,
+        None => dict.set_item("reason", py.None())?,
+    }
+    dict.set_item("is_sentinel", outcome.is_sentinel)?;
+
+    Ok(dict.into())
+}
+
+fn path_sensitivity_to_python(py: Python<'_>, sensitivity: PathSensitivity) -> PyResult<PyObject> {
+    let dict = PyDict::new(py);
+
+    dict.set_item("category", sensitivity.category)?;
+    dict.set_item("severity", sensitivity.severity)?;
+    dict.set_item("reason", sensitivity.reason)?;
+
+    Ok(dict.into())
 }
 
 #[pyfunction]
@@ -147,6 +207,10 @@ fn evaluate_subjective_risk(json_payload: String) -> PyResult<String> {
 #[pymodule]
 fn rygnal_kernel(_py: Python, module: &PyModule) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(verify_bridge, module)?)?;
+    module.add_function(wrap_pyfunction!(engine_version, module)?)?;
+    module.add_function(wrap_pyfunction!(validate_repo_relative_path, module)?)?;
+    module.add_function(wrap_pyfunction!(validate_patch_path, module)?)?;
+    module.add_function(wrap_pyfunction!(classify_path_sensitivity, module)?)?;
     module.add_function(wrap_pyfunction!(evaluate_patch_risk, module)?)?;
     module.add_function(wrap_pyfunction!(analyze_code_structure, module)?)?;
     module.add_function(wrap_pyfunction!(evaluate_agent_action, module)?)?;

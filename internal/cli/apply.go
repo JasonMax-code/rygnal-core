@@ -57,6 +57,17 @@ and Git applicability before applying anything to the trusted repository.`,
 }
 
 func runApply(cmd *cobra.Command, runID string, opts *applyOptions) error {
+	store, err := localReviewStoreFromCurrentRepo()
+	if err != nil {
+		return err
+	}
+
+	return withLocalReviewLock(store, func() error {
+		return runApplyLocked(cmd, runID, opts)
+	})
+}
+
+func runApplyLocked(cmd *cobra.Command, runID string, opts *applyOptions) error {
 	if !opts.yes {
 		return fmt.Errorf("refusing to apply without explicit --yes confirmation")
 	}

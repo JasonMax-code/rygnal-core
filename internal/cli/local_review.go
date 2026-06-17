@@ -115,6 +115,21 @@ func safeRunID(runID string) string {
 }
 
 func persistRunReviewArtifact(repoRoot string, requestID string, event *engineclient.EngineEvent) error {
+	store, err := newLocalReviewStore(repoRoot)
+	if err != nil {
+		return err
+	}
+
+	if err := store.ensure(); err != nil {
+		return err
+	}
+
+	return withLocalReviewLock(store, func() error {
+		return persistRunReviewArtifactLocked(repoRoot, requestID, event)
+	})
+}
+
+func persistRunReviewArtifactLocked(repoRoot string, requestID string, event *engineclient.EngineEvent) error {
 	if event == nil {
 		return nil
 	}

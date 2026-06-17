@@ -1,42 +1,3 @@
-<!-- RYGNAL_LOCAL_VALIDATION_STATUS -->
-
-## Current Status
-
-Rygnal Core is a local-first core MVP for runtime governance of AI-agent tool actions. It is not a full SaaS product, enterprise deployment, or enterprise production-ready platform. It is not enterprise production-ready.
-
-## Local Validation Environment
-
-Create and activate a virtual environment:
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-```
-
-Install development dependencies and the editable package:
-
-```bash
-make install-dev
-pip install -e .
-```
-
-Check the editable package and CLI:
-
-```bash
-make check-install
-rygnal --help
-rygnal version
-```
-
-Run validation:
-
-```bash
-make validate
-make validate-local
-```
-
-<!-- /RYGNAL_LOCAL_VALIDATION_STATUS -->
-
 <div align="center">
   <table style="border: none; border-collapse: collapse; background: transparent; margin: 40px 0 16px 0;">
     <tr style="border: none; background: transparent;">
@@ -142,14 +103,4 @@ It mathematically protects your human-written code, allowing you to safely run a
     </tr>
   </table>
 
-  <!-- Engineered Badge Subtext -->
-  <div style="margin-top: 48px; display: inline-flex; align-items: center; gap: 8px; background: linear-gradient(135deg, rgba(99, 102, 241, 0.08), rgba(6, 182, 212, 0.08)); border: 1px solid rgba(99, 102, 241, 0.2); padding: 6px 14px; border-radius: 100px;">
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#06b6d4" stroke-width="2.5">
-      <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
-      <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
-    </svg>
-    <span style="font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: #06b6d4;">Built for safer AI-agent systems</span>
-  </div>
-</div>
-<!-- END OF INDUSTRIAL FOOTER SECTION -->
-
+ 

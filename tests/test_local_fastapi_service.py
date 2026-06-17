@@ -216,20 +216,20 @@ def test_local_api_audit_events_without_logger_returns_empty_result():
     assert data["malformed_count"] == 0
 
 
-def test_local_api_audit_events_rejects_invalid_query_safely():
+def test_local_api_audit_events_clamps_oversized_limit_safely():
     client = TestClient(create_app())
 
     response = client.get(
         "/v1/audit/events",
         params={"limit": 999999},
-        headers={"X-Request-ID": "req_bad_audit_query"},
+        headers={"X-Request-ID": "req_large_audit_query"},
     )
 
     data = response.json()
-    body = response.text.lower()
 
-    assert response.status_code == 400
-    assert data["error"]["code"] == "audit_query_error"
-    assert data["error"]["request_id"] == "req_bad_audit_query"
-    assert data["error"]["retryable"] is False
-    assert "traceback" not in body
+    assert response.status_code == 200
+    assert data["limit"] == 500
+    assert data["offset"] == 0
+    assert data["returned_count"] == 0
+    assert data["malformed_count"] == 0
+    assert data["integrity_verified"] is None

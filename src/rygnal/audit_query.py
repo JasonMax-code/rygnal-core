@@ -2,13 +2,15 @@
 
 This module intentionally does not mutate audit logs. It provides a stable,
 API/CLI-friendly query layer over JSONL audit logs with safe malformed-line
-handling and bounded pagination.
+handling, bounded pagination, optional lazy integrity verification, and
+single-event lookup support.
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -25,6 +27,7 @@ class AuditQueryError(ValueError):
 class AuditQuery:
     """Filter and pagination options for read-only audit queries."""
 
+    event_id: str | None = None
     trace_id: str | None = None
     decision: str | None = None
     tool_name: str | None = None
@@ -52,6 +55,7 @@ class AuditQueryResult:
     limit: int = 100
     offset: int = 0
     newest_first: bool = False
+    integrity_verified: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return JSON/API-safe data."""
@@ -65,29 +69,32 @@ class AuditQueryResult:
             "limit": self.limit,
             "offset": self.offset,
             "newest_first": self.newest_first,
+            "integrity_verified": self.integrity_verified,
         }
 
 
 def query_audit_events(
     source: str | Path | object,
     query: AuditQuery | None = None,
+    *,
+    verify_integrity: bool = False,
 ) -> AuditQueryResult:
     """Query audit events from a JSONL path or read-only event source.
 
     `source` may be:
     - a JSONL path
+    - an AuditLogger-like object exposing `log_path`
     - an object exposing `read_events() -> list[AuditEvent]`
 
     Malformed JSONL lines are skipped and counted instead of raising.
+    Integrity verification is opt-in because hash-chain verification may be
+    expensive for large logs.
     """
 
-    active_query = query or AuditQuery()
+    active_query = _normalize_query(query or AuditQuery())
     _validate_query(active_query)
 
-    if hasattr(source, "read_events") and not isinstance(source, (str, Path)):
-        events, malformed_count, warnings = _read_events_from_source(source)
-    else:
-        events, malformed_count, warnings = _read_jsonl_events(Path(source))
+    events, malformed_count, warnings = _read_audit_events_safely(source)
 
     since = _parse_optional_timestamp(active_query.since, field_name="since")
     until = _parse_optional_timestamp(active_query.until, field_name="until")
@@ -102,6 +109,12 @@ def query_audit_events(
     page = filtered[active_query.offset : active_query.offset + active_query.limit]
     safe_page = tuple(_redact_event(event) for event in page)
 
+    integrity_verified, integrity_warnings = _verify_integrity_if_requested(
+        source,
+        verify_integrity=verify_integrity,
+    )
+    warnings.extend(integrity_warnings)
+
     return AuditQueryResult(
         events=safe_page,
         total_scanned=len(events),
@@ -112,7 +125,14 @@ def query_audit_events(
         limit=active_query.limit,
         offset=active_query.offset,
         newest_first=active_query.newest_first,
+        integrity_verified=integrity_verified,
     )
+
+
+def _normalize_query(query: AuditQuery) -> AuditQuery:
+    if query.limit > query.max_limit:
+        return replace(query, limit=query.max_limit)
+    return query
 
 
 def _validate_query(query: AuditQuery) -> None:
@@ -125,10 +145,23 @@ def _validate_query(query: AuditQuery) -> None:
     if query.max_limit <= 0:
         raise AuditQueryError("Audit query max_limit must be positive.")
 
-    if query.limit > query.max_limit:
-        raise AuditQueryError(
-            f"Audit query limit {query.limit} exceeds max_limit {query.max_limit}."
-        )
+
+def _read_audit_events_safely(
+    source: str | Path | object,
+) -> tuple[list[AuditEvent], int, list[str]]:
+    """Read audit events without letting one corrupt line fail the whole query."""
+
+    if isinstance(source, str | Path):
+        return _read_jsonl_events(Path(source))
+
+    log_path = getattr(source, "log_path", None)
+    if log_path is not None:
+        return _read_jsonl_events(Path(log_path))
+
+    if hasattr(source, "read_events"):
+        return _read_events_from_source(source)
+
+    raise AuditQueryError("Unsupported audit query source.")
 
 
 def _read_events_from_source(source: object) -> tuple[list[AuditEvent], int, list[str]]:
@@ -173,6 +206,32 @@ def _read_jsonl_events(path: Path) -> tuple[list[AuditEvent], int, list[str]]:
     return events, malformed_count, warnings
 
 
+def _verify_integrity_if_requested(
+    source: str | Path | object,
+    *,
+    verify_integrity: bool,
+) -> tuple[bool | None, list[str]]:
+    if not verify_integrity:
+        return None, []
+
+    verifier = _resolve_integrity_verifier(source)
+    if verifier is None:
+        return None, ["Audit integrity verification is unavailable for this source."]
+
+    try:
+        return bool(verifier()), []
+    except Exception:
+        return False, ["Audit integrity verification failed."]
+
+
+def _resolve_integrity_verifier(source: str | Path | object) -> Callable[[], bool] | None:
+    verify_method = getattr(source, "verify_integrity", None)
+    if callable(verify_method):
+        return verify_method
+
+    return None
+
+
 def _matches_query(
     event: AuditEvent,
     query: AuditQuery,
@@ -180,6 +239,9 @@ def _matches_query(
     since: datetime | None,
     until: datetime | None,
 ) -> bool:
+    if query.event_id is not None and event.event_id != query.event_id:
+        return False
+
     if query.trace_id is not None and event.trace_id != query.trace_id:
         return False
 

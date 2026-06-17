@@ -128,6 +128,14 @@ func runExecutionPipeline(
 		return err
 	}
 
+	store, err := newLocalReviewStore(repoRoot)
+	if err != nil {
+		return err
+	}
+	if err := store.ensure(); err != nil {
+		return err
+	}
+
 	if opts.unsafeLocal && !opts.jsonMode {
 		fmt.Fprintln(
 			cmd.ErrOrStderr(),
@@ -145,6 +153,8 @@ func runExecutionPipeline(
 		RequestID:       requestID,
 		TrustedRepoPath: repoRoot,
 		AgentArgs:       append([]string(nil), agentArgs...),
+		AuditLogPath:    store.auditPath,
+		IncludeRawPatch: !opts.jsonMode,
 		UnsafeLocal:     opts.unsafeLocal,
 		DebugMode:       opts.debugMode,
 		TimeoutSec:      opts.timeoutSec,
@@ -164,35 +174,38 @@ func runExecutionPipeline(
 		return err
 	}
 
+	if !opts.jsonMode {
+		if err := persistRunReviewArtifact(repoRoot, requestID, result.LastEvent); err != nil {
+			return err
+		}
+	}
+
 	return exitErrorForLastEvent(result.LastEvent)
 }
 
 func renderHumanEngineEvent(cmd *cobra.Command, event engineclient.EngineEvent) error {
 	switch event.Event {
-	case "engine.started":
-		fmt.Fprintln(cmd.OutOrStdout(), "Rygnal engine started")
-	case "request.accepted":
-		fmt.Fprintln(cmd.OutOrStdout(), "Request accepted by Python engine")
+	case "engine.started", "request.accepted", "command.started", "workspace.cleaned":
+		return nil
 	case "run.started":
-		fmt.Fprintln(cmd.OutOrStdout(), "Guarded run started")
+		fmt.Fprintln(cmd.OutOrStdout(), "Rygnal guarded run started")
 	case "workspace.created":
 		runID := fieldFromData(event.Data, "run_id")
 		if runID != "" {
-			fmt.Fprintf(cmd.OutOrStdout(), "Workspace created: %s\n", runID)
+			fmt.Fprintf(cmd.OutOrStdout(), "Workspace ready: %s\n", runID)
 		} else {
-			fmt.Fprintln(cmd.OutOrStdout(), "Workspace created")
+			fmt.Fprintln(cmd.OutOrStdout(), "Workspace ready")
 		}
-	case "command.started":
-		fmt.Fprintln(cmd.OutOrStdout(), "Agent command started")
 	case "command.finished":
 		exitCode := fieldFromData(event.Data, "exit_code")
-		if exitCode != "" {
+		durationMs := fieldFromData(event.Data, "duration_ms")
+		if exitCode != "" && durationMs != "" {
+			fmt.Fprintf(cmd.OutOrStdout(), "Agent command finished: exit_code=%s duration=%sms\n", exitCode, durationMs)
+		} else if exitCode != "" {
 			fmt.Fprintf(cmd.OutOrStdout(), "Agent command finished: exit_code=%s\n", exitCode)
 		} else {
 			fmt.Fprintln(cmd.OutOrStdout(), "Agent command finished")
 		}
-	case "workspace.cleaned":
-		fmt.Fprintln(cmd.OutOrStdout(), "Workspace cleaned")
 	case "approval.required":
 		data, err := engineclient.DecodeRunCompletedData(event)
 		if err != nil {
@@ -203,7 +216,12 @@ func renderHumanEngineEvent(cmd *cobra.Command, event engineclient.EngineEvent) 
 		if event.Status == "approval_required" {
 			return nil
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "Run completed: status=%s\n", event.Status)
+
+		data, err := engineclient.DecodeRunCompletedData(event)
+		if err != nil {
+			return err
+		}
+		renderRunCompleted(cmd, data)
 	case "run.failed":
 		fmt.Fprintf(cmd.ErrOrStderr(), "Run failed: status=%s\n", event.Status)
 	case "engine.error":
@@ -213,10 +231,52 @@ func renderHumanEngineEvent(cmd *cobra.Command, event engineclient.EngineEvent) 
 			fmt.Fprintf(cmd.ErrOrStderr(), "Engine error: status=%s\n", event.Status)
 		}
 	default:
-		fmt.Fprintf(cmd.OutOrStdout(), "Engine event: %s status=%s\n", event.Event, event.Status)
+		return nil
 	}
 
 	return nil
+}
+
+func renderRunCompleted(cmd *cobra.Command, data engineclient.RunCompletedData) {
+	out := cmd.OutOrStdout()
+
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Rygnal guarded run")
+	fmt.Fprintln(out)
+	fmt.Fprintf(out, "Status: %s\n", data.Status)
+	fmt.Fprintf(out, "Backend: %s\n", data.Backend.Name)
+	fmt.Fprintf(out, "Containment verified: %s\n", yesNo(data.Backend.ContainmentVerified))
+	fmt.Fprintln(out, "Trusted repo: hidden")
+	fmt.Fprintln(out, "Workspace: hidden")
+	fmt.Fprintf(out, "Baseline: %s\n", shortValue(data.BaselineCommitSHA, 7))
+
+	if data.Command.Present {
+		if data.Command.ExitCode != nil {
+			fmt.Fprintf(out, "Agent command: exit_code=%d duration=%dms\n", *data.Command.ExitCode, data.Command.DurationMs)
+		} else if data.Command.TimedOut {
+			fmt.Fprintf(out, "Agent command: timed_out duration=%dms\n", data.Command.DurationMs)
+		}
+	}
+
+	fmt.Fprintf(out, "Changed files: %d\n", data.Changes.ChangedFileCount)
+
+	if data.Patch.Generated {
+		fmt.Fprintf(out, "Patch digest: sha256:%s\n", shortValue(data.Patch.SHA256, 12))
+	}
+
+	if data.Risk.Present {
+		fmt.Fprintf(out, "Risk level: %s\n", data.Risk.Level)
+	}
+
+	if data.BlockedReason != "" {
+		fmt.Fprintf(out, "Blocked reason: %s\n", data.BlockedReason)
+	}
+
+	renderWarnings(out, data.Warnings)
+
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Next:")
+	fmt.Fprintln(out, "  rygnal audit")
 }
 
 func renderApprovalRequired(cmd *cobra.Command, data engineclient.RunCompletedData) {
@@ -246,11 +306,48 @@ func renderApprovalRequired(cmd *cobra.Command, data engineclient.RunCompletedDa
 	}
 
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, "Next steps:")
-	fmt.Fprintln(out, "  1. Review the patch through Rygnal audit/patch inspection.")
-	fmt.Fprintln(out, "  2. Approve only if the patch matches your intent.")
-	fmt.Fprintln(out, "  3. Apply through Rygnal's approved patch flow.")
+	fmt.Fprintln(out, "Next:")
+	fmt.Fprintln(out, "  1. Inspect the audit trail: rygnal audit")
+	fmt.Fprintln(out, "  2. Review the patch digest before approving.")
+	fmt.Fprintln(out, "  3. Approve/apply only through Rygnal.")
 	fmt.Fprintln(out, "  4. Do not manually copy changes from the disposable workspace.")
+}
+
+func renderWarnings(out interface{ Write([]byte) (int, error) }, warnings []string) {
+	normalized := normalizeWarnings(warnings)
+	if len(normalized) == 0 {
+		return
+	}
+
+	fmt.Fprintln(out, "Warnings:")
+	for _, warning := range normalized {
+		fmt.Fprintf(out, "  - %s\n", warning)
+	}
+}
+
+func normalizeWarnings(warnings []string) []string {
+	seen := make(map[string]struct{}, len(warnings))
+	normalized := make([]string, 0, len(warnings))
+
+	for _, warning := range warnings {
+		value := strings.TrimSpace(warning)
+		if value == "" {
+			continue
+		}
+
+		if strings.Contains(value, "Unsafe local execution is not a containment backend") {
+			value = "Unsafe local mode is not a containment boundary."
+		}
+
+		if _, ok := seen[value]; ok {
+			continue
+		}
+
+		seen[value] = struct{}{}
+		normalized = append(normalized, value)
+	}
+
+	return normalized
 }
 
 func exitErrorForLastEvent(event *engineclient.EngineEvent) error {

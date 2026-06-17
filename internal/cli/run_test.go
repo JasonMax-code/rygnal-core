@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -118,15 +119,20 @@ func TestRunHumanRendersEngineLifecycle(t *testing.T) {
 	}
 
 	expectedFragments := []string{
-		"Rygnal engine started",
-		"Request accepted by Python engine",
-		"Run completed: status=completed",
+		"Rygnal guarded run",
+		"Status: completed",
+		"Next:",
+		"rygnal audit",
 	}
 
 	for _, fragment := range expectedFragments {
 		if !strings.Contains(stdout, fragment) {
 			t.Fatalf("stdout missing %q:\n%s", fragment, stdout)
 		}
+	}
+
+	if strings.Contains(stdout, "Request accepted by Python engine") {
+		t.Fatalf("human output should not expose Python engine internals:\n%s", stdout)
 	}
 }
 
@@ -168,6 +174,9 @@ func TestRunHumanRendersApprovalRequiredAndReturnsExitCode(t *testing.T) {
 		"Risk level: high",
 		"Files changed: 1",
 		"  - dependency-file-change",
+		"Inspect the audit trail: rygnal audit",
+		"Review the patch digest before approving.",
+		"Approve/apply only through Rygnal.",
 		"Do not manually copy changes from the disposable workspace.",
 	}
 
@@ -179,6 +188,10 @@ func TestRunHumanRendersApprovalRequiredAndReturnsExitCode(t *testing.T) {
 
 	if strings.Contains(stdout, "Run completed: status=approval_required") {
 		t.Fatalf("approval_required run.completed should not render duplicate generic line:\n%s", stdout)
+	}
+
+	if strings.Contains(stdout, "Request accepted by Python engine") {
+		t.Fatalf("human output should not expose Python engine internals:\n%s", stdout)
 	}
 }
 
@@ -211,12 +224,36 @@ func TestRunPropagatesEngineError(t *testing.T) {
 	}
 }
 
+func newTestGitRepo(t *testing.T) string {
+	t.Helper()
+
+	repoRoot := t.TempDir()
+
+	runGit := func(args ...string) {
+		t.Helper()
+
+		cmd := exec.Command("git", append([]string{"-C", repoRoot}, args...)...)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, string(output))
+		}
+	}
+
+	runGit("init")
+	runGit("config", "user.email", "test@example.com")
+	runGit("config", "user.name", "Rygnal Test")
+
+	return repoRoot
+}
+
 func fakeApprovalRequiredRunDependencies(t *testing.T) runDependencies {
 	t.Helper()
 
+	repoRoot := newTestGitRepo(t)
+
 	return runDependencies{
 		resolveGitRoot: func() (string, error) {
-			return "/tmp/trusted-repo", nil
+			return repoRoot, nil
 		},
 		resolveEngineRoot: func() (string, error) {
 			return "/tmp/rygnal-engine-root", nil
@@ -288,9 +325,11 @@ func fakeApprovalRequiredRunDependencies(t *testing.T) runDependencies {
 func fakeRunDependencies(t *testing.T) runDependencies {
 	t.Helper()
 
+	repoRoot := newTestGitRepo(t)
+
 	return runDependencies{
 		resolveGitRoot: func() (string, error) {
-			return "/tmp/trusted-repo", nil
+			return repoRoot, nil
 		},
 		resolveEngineRoot: func() (string, error) {
 			return "/tmp/rygnal-engine-root", nil
@@ -303,7 +342,7 @@ func fakeRunDependencies(t *testing.T) runDependencies {
 			opts engineclient.EngineOptions,
 			handler engineclient.EventHandler,
 		) (engineclient.Result, error) {
-			if opts.TrustedRepoPath != "/tmp/trusted-repo" {
+			if opts.TrustedRepoPath != repoRoot {
 				t.Fatalf("unexpected trusted repo path: %q", opts.TrustedRepoPath)
 			}
 
@@ -399,4 +438,29 @@ func executeForTestWithDeps(deps runDependencies, args ...string) (string, strin
 	err := cmd.Execute()
 
 	return stdout.String(), stderr.String(), err
+}
+
+func TestNormalizeWarningsDeduplicatesUnsafeLocalMessages(t *testing.T) {
+	warnings := normalizeWarnings([]string{
+		"Unsafe local execution is not a containment backend and must never be selected by default.",
+		"POSIX process groups are not a security boundary.",
+		"Unsafe local execution is not a containment backend.",
+		"  ",
+		"POSIX process groups are not a security boundary.",
+	})
+
+	expected := []string{
+		"Unsafe local mode is not a containment boundary.",
+		"POSIX process groups are not a security boundary.",
+	}
+
+	if len(warnings) != len(expected) {
+		t.Fatalf("expected %d warnings, got %d: %#v", len(expected), len(warnings), warnings)
+	}
+
+	for idx, warning := range warnings {
+		if warning != expected[idx] {
+			t.Fatalf("warning %d: expected %q, got %q", idx, expected[idx], warning)
+		}
+	}
 }

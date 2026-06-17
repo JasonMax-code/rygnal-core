@@ -252,8 +252,11 @@ func listRunReviewRecords(store localReviewStore) ([]runReviewRecord, error) {
 			record.Apply = &applyRecord
 		}
 
-		if decisionRecord, err := readLocalDecisionRecord(filepath.Join(store.runsDir, entry.Name(), decisionRecordFileName)); err == nil {
+		decisionPath := filepath.Join(store.runsDir, entry.Name(), decisionRecordFileName)
+		if decisionRecord, err := readLocalDecisionRecord(decisionPath); err == nil {
 			record.Decision = &decisionRecord
+		} else if !os.IsNotExist(err) {
+			return nil, err
 		}
 
 		records = append(records, record)

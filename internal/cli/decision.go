@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -46,13 +47,9 @@ func newApproveCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "approve [run_id]",
 		Short: "Approve a local Rygnal review run for apply",
-		Args:  cobra.MaximumNArgs(1),
+		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			runID := ""
-			if len(args) > 0 {
-				runID = args[0]
-			}
-			return runDecisionCommand(cmd, runID, opts)
+			return runDecisionCommand(cmd, args[0], opts)
 		},
 	}
 
@@ -72,13 +69,9 @@ func newRejectCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "reject [run_id]",
 		Short: "Reject a local Rygnal review run",
-		Args:  cobra.MaximumNArgs(1),
+		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			runID := ""
-			if len(args) > 0 {
-				runID = args[0]
-			}
-			return runDecisionCommand(cmd, runID, opts)
+			return runDecisionCommand(cmd, args[0], opts)
 		},
 	}
 
@@ -100,6 +93,12 @@ func runDecisionCommand(cmd *cobra.Command, runID string, opts *decisionOptions)
 }
 
 func runDecisionCommandLocked(cmd *cobra.Command, store localReviewStore, runID string, opts *decisionOptions) error {
+	opts.reason = strings.TrimSpace(opts.reason)
+	opts.decidedBy = strings.TrimSpace(opts.decidedBy)
+	if opts.decidedBy == "" {
+		opts.decidedBy = "local-user"
+	}
+
 	if opts.status == localDecisionApproved && !opts.yes {
 		return fmt.Errorf("refusing to approve without explicit --yes confirmation")
 	}
@@ -113,8 +112,12 @@ func runDecisionCommandLocked(cmd *cobra.Command, store localReviewStore, runID 
 		return err
 	}
 
+	if record.Apply != nil {
+		return fmt.Errorf("run %s was already applied; refusing to change approval decision", record.RunID)
+	}
+
 	if record.Decision != nil {
-		return fmt.Errorf("run %s already has a decision: %s", record.RunID, record.Decision.Status)
+		return fmt.Errorf("run %s already has a decision: %s", record.RunID, decisionStatus(record))
 	}
 
 	if record.Patch.SHA256 == "" {
@@ -200,7 +203,18 @@ func decisionStatus(record runReviewRecord) string {
 	if record.Decision == nil {
 		return "undecided"
 	}
-	return record.Decision.Status
+	if record.Decision.Schema != "" && record.Decision.Schema != localDecisionSchema {
+		return "invalid"
+	}
+	if record.Decision.RunID != "" && record.Decision.RunID != record.RunID {
+		return "invalid"
+	}
+	switch record.Decision.Status {
+	case localDecisionApproved, localDecisionRejected:
+		return record.Decision.Status
+	default:
+		return "invalid"
+	}
 }
 
 func renderDecision(out interface{ Write([]byte) (int, error) }, record runReviewRecord) {
@@ -224,13 +238,53 @@ func renderDecision(out interface{ Write([]byte) (int, error) }, record runRevie
 	}
 }
 
-func assertDecisionAllowsApply(record runReviewRecord) error {
-	if record.Decision != nil && record.Decision.Status == localDecisionRejected {
-		return fmt.Errorf("run %s was rejected: %s", record.RunID, valueOrDash(record.Decision.Reason))
+func validateDecisionRecordForRun(record runReviewRecord) error {
+	if record.Decision == nil {
+		return nil
 	}
 
-	if record.Decision != nil && record.Decision.PatchSHA256 != "" && record.Patch.SHA256 != "" && record.Decision.PatchSHA256 != record.Patch.SHA256 {
+	decision := record.Decision
+
+	if decision.Schema != localDecisionSchema {
+		return fmt.Errorf("decision record for run %s has unsupported schema %q", record.RunID, decision.Schema)
+	}
+
+	if decision.RunID != record.RunID {
+		return fmt.Errorf("decision record run_id %q does not match requested run %s", decision.RunID, record.RunID)
+	}
+
+	switch decision.Status {
+	case localDecisionApproved, localDecisionRejected:
+	default:
+		return fmt.Errorf("decision record for run %s has unsupported status %q", record.RunID, decision.Status)
+	}
+
+	if decision.PatchSHA256 == "" {
+		return fmt.Errorf("decision record for run %s is missing patch digest", record.RunID)
+	}
+
+	if record.Patch.SHA256 != "" && decision.PatchSHA256 != record.Patch.SHA256 {
 		return fmt.Errorf("decision patch digest does not match review patch digest for run %s", record.RunID)
+	}
+
+	if decision.BaselineCommitSHA == "" {
+		return fmt.Errorf("decision record for run %s is missing baseline commit", record.RunID)
+	}
+
+	if record.Baseline != "" && decision.BaselineCommitSHA != record.Baseline {
+		return fmt.Errorf("decision baseline does not match review baseline for run %s", record.RunID)
+	}
+
+	return nil
+}
+
+func assertDecisionAllowsApply(record runReviewRecord) error {
+	if err := validateDecisionRecordForRun(record); err != nil {
+		return err
+	}
+
+	if record.Decision != nil && record.Decision.Status == localDecisionRejected {
+		return fmt.Errorf("run %s was rejected: %s", record.RunID, valueOrDash(record.Decision.Reason))
 	}
 
 	if record.Approval.Required {

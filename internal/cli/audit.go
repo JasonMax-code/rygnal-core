@@ -182,6 +182,9 @@ func renderRunReviewSummary(cmd *cobra.Command, record runReviewRecord) {
 	}
 
 	fmt.Fprintf(out, "Changed files: %d\n", data.Changes.ChangedFileCount)
+	if record.Changes.ChangedFileCount > 1 {
+		fmt.Fprintln(out, "Approval granularity: full patch only")
+	}
 
 	if data.Patch.Generated {
 		fmt.Fprintf(out, "Patch digest: sha256:%s\n", shortValue(data.Patch.SHA256, 12))

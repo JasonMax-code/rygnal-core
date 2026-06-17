@@ -108,7 +108,7 @@ func runAuditList(cmd *cobra.Command, opts *auditOptions) error {
 
 	fmt.Fprintln(out, "Rygnal audit")
 	fmt.Fprintln(out)
-	fmt.Fprintf(out, "%-14s  %-18s  %-8s  %-5s  %-12s  %s\n", "RUN", "STATUS", "RISK", "FILES", "APPLY", "PATCH")
+	fmt.Fprintf(out, "%-14s  %-18s  %-8s  %-5s  %-12s  %-10s  %s\n", "RUN", "STATUS", "RISK", "FILES", "APPLY", "DECISION", "PATCH")
 	for _, record := range records[:limit] {
 		risk := record.Risk.Level
 		if risk == "" {
@@ -127,12 +127,13 @@ func runAuditList(cmd *cobra.Command, opts *auditOptions) error {
 
 		fmt.Fprintf(
 			out,
-			"%-14s  %-18s  %-8s  %-5d  %-12s  %s\n",
+			"%-14s  %-18s  %-8s  %-5d  %-12s  %-10s  %s\n",
 			shortValue(record.RunID, 14),
 			valueOrDash(record.Status),
 			risk,
 			record.Changes.ChangedFileCount,
 			applyStatus,
+			decisionStatus(record),
 			patch,
 		)
 	}
@@ -205,6 +206,7 @@ func renderRunReviewSummary(cmd *cobra.Command, record runReviewRecord) {
 		fmt.Fprintf(out, "Blocked reason: %s\n", data.BlockedReason)
 	}
 
+	renderDecision(out, record)
 	renderApplyDecision(out, record)
 	renderWarnings(out, record.Warnings)
 
@@ -278,6 +280,7 @@ func runAuditDiff(cmd *cobra.Command, runID string, opts *auditOptions) error {
 	if record.Apply != nil {
 		fmt.Fprintf(out, "Apply: %s\n", record.Apply.Status)
 	}
+	fmt.Fprintf(out, "Decision: %s\n", decisionStatus(record))
 	fmt.Fprintln(out)
 
 	renderVisualDiff(out, string(payload), opts.noColor)

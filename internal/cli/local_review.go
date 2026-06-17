@@ -34,25 +34,27 @@ type localReviewStore struct {
 }
 
 type runReviewRecord struct {
-	RunID          string `json:"run_id"`
-	RequestID      string `json:"request_id"`
-	sortUnixNano   int64
-	Status         string                        `json:"status"`
-	Baseline       string                        `json:"baseline_commit_sha"`
-	Backend        engineclient.BackendInfo      `json:"backend"`
-	Command        engineclient.CommandInfo      `json:"command"`
-	Changes        engineclient.ChangesInfo      `json:"changes"`
-	Patch          engineclient.PatchInfo        `json:"patch"`
-	Risk           engineclient.RiskInfo         `json:"risk"`
-	Approval       engineclient.ApprovalInfo     `json:"approval"`
-	BlockedReason  string                        `json:"blocked_reason"`
-	Warnings       []string                      `json:"warnings"`
-	Summary        engineclient.RunCompletedData `json:"summary"`
-	PatchPath      string                        `json:"-"`
-	SummaryPath    string                        `json:"-"`
-	PatchDigest    string                        `json:"patch_digest,omitempty"`
-	Apply          *localApplyRecord             `json:"apply,omitempty"`
-	ArtifactSchema string                        `json:"artifact_schema"`
+	RunID                 string `json:"run_id"`
+	RequestID             string `json:"request_id"`
+	sortUnixNano          int64
+	Status                string                        `json:"status"`
+	Baseline              string                        `json:"baseline_commit_sha"`
+	Backend               engineclient.BackendInfo      `json:"backend"`
+	Command               engineclient.CommandInfo      `json:"command"`
+	Changes               engineclient.ChangesInfo      `json:"changes"`
+	Patch                 engineclient.PatchInfo        `json:"patch"`
+	Risk                  engineclient.RiskInfo         `json:"risk"`
+	Approval              engineclient.ApprovalInfo     `json:"approval"`
+	BlockedReason         string                        `json:"blocked_reason"`
+	Warnings              []string                      `json:"warnings"`
+	Summary               engineclient.RunCompletedData `json:"summary"`
+	PatchPath             string                        `json:"-"`
+	SummaryPath           string                        `json:"-"`
+	PatchDigest           string                        `json:"patch_digest,omitempty"`
+	Apply                 *localApplyRecord             `json:"apply,omitempty"`
+	Decision              *localDecisionRecord          `json:"decision,omitempty"`
+	DecisionInvalidReason string                        `json:"decision_invalid_reason,omitempty"`
+	ArtifactSchema        string                        `json:"artifact_schema"`
 }
 
 func newLocalReviewStore(repoRoot string) (localReviewStore, error) {
@@ -249,6 +251,13 @@ func listRunReviewRecords(store localReviewStore) ([]runReviewRecord, error) {
 
 		if applyRecord, err := readLocalApplyRecord(filepath.Join(store.runsDir, entry.Name(), applyRecordFileName)); err == nil {
 			record.Apply = &applyRecord
+		}
+
+		decisionPath := filepath.Join(store.runsDir, entry.Name(), decisionRecordFileName)
+		if decisionRecord, err := readLocalDecisionRecord(decisionPath); err == nil {
+			record.Decision = &decisionRecord
+		} else if !os.IsNotExist(err) {
+			record.DecisionInvalidReason = err.Error()
 		}
 
 		records = append(records, record)

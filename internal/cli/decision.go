@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -12,8 +11,9 @@ import (
 )
 
 const (
-	decisionRecordFileName = "decision.json"
-	localDecisionSchema    = "rygnal.local_decision.v1"
+	decisionRecordFileName   = "decision.json"
+	localDecisionSchema      = "rygnal.local_decision.v1"
+	localDecisionEventSchema = "rygnal.local_decision_event.v1"
 
 	localDecisionApproved = "approved"
 	localDecisionRejected = "rejected"
@@ -21,6 +21,18 @@ const (
 
 type localDecisionRecord struct {
 	Schema            string `json:"schema"`
+	RunID             string `json:"run_id"`
+	Status            string `json:"status"`
+	DecidedAt         string `json:"decided_at"`
+	DecidedBy         string `json:"decided_by"`
+	Reason            string `json:"reason,omitempty"`
+	PatchSHA256       string `json:"patch_sha256,omitempty"`
+	BaselineCommitSHA string `json:"baseline_commit_sha,omitempty"`
+}
+
+type localDecisionAuditEvent struct {
+	Schema            string `json:"schema"`
+	Event             string `json:"event"`
 	RunID             string `json:"run_id"`
 	Status            string `json:"status"`
 	DecidedAt         string `json:"decided_at"`
@@ -39,14 +51,13 @@ type decisionOptions struct {
 
 func newApproveCmd() *cobra.Command {
 	opts := &decisionOptions{
-		status:    localDecisionApproved,
-		decidedBy: "local-user",
-		reason:    "Approved for local apply.",
+		status: localDecisionApproved,
+		reason: "Approved for local apply.",
 	}
 
 	cmd := &cobra.Command{
 		Use:   "approve [run_id]",
-		Short: "Approve a local Rygnal review run for apply",
+		Short: "Approve a reviewed local patch for rygnal apply",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runDecisionCommand(cmd, args[0], opts)
@@ -55,20 +66,19 @@ func newApproveCmd() *cobra.Command {
 
 	cmd.Flags().BoolVar(&opts.yes, "yes", false, "Confirm approval decision")
 	cmd.Flags().StringVar(&opts.reason, "reason", opts.reason, "Approval reason")
-	cmd.Flags().StringVar(&opts.decidedBy, "decided-by", opts.decidedBy, "Decision actor")
+	cmd.Flags().StringVar(&opts.decidedBy, "decided-by", "", "Decision actor; defaults to git identity or OS user")
 
 	return cmd
 }
 
 func newRejectCmd() *cobra.Command {
 	opts := &decisionOptions{
-		status:    localDecisionRejected,
-		decidedBy: "local-user",
+		status: localDecisionRejected,
 	}
 
 	cmd := &cobra.Command{
 		Use:   "reject [run_id]",
-		Short: "Reject a local Rygnal review run",
+		Short: "Reject a reviewed local patch and prevent rygnal apply",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runDecisionCommand(cmd, args[0], opts)
@@ -76,7 +86,7 @@ func newRejectCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&opts.reason, "reason", "", "Rejection reason")
-	cmd.Flags().StringVar(&opts.decidedBy, "decided-by", opts.decidedBy, "Decision actor")
+	cmd.Flags().StringVar(&opts.decidedBy, "decided-by", "", "Decision actor; defaults to git identity or OS user")
 
 	return cmd
 }
@@ -96,7 +106,7 @@ func runDecisionCommandLocked(cmd *cobra.Command, store localReviewStore, runID 
 	opts.reason = strings.TrimSpace(opts.reason)
 	opts.decidedBy = strings.TrimSpace(opts.decidedBy)
 	if opts.decidedBy == "" {
-		opts.decidedBy = "local-user"
+		opts.decidedBy = defaultDecisionActor(store)
 	}
 
 	if opts.status == localDecisionApproved && !opts.yes {
@@ -107,13 +117,17 @@ func runDecisionCommandLocked(cmd *cobra.Command, store localReviewStore, runID 
 		return fmt.Errorf("reject requires --reason")
 	}
 
-	record, err := selectRunReviewRecord(store, runID)
+	record, err := findRunReviewRecord(store, runID)
 	if err != nil {
 		return err
 	}
 
 	if record.Apply != nil {
 		return fmt.Errorf("run %s was already applied; refusing to change approval decision", record.RunID)
+	}
+
+	if record.DecisionInvalidReason != "" {
+		return fmt.Errorf("run %s has invalid decision state: %s", record.RunID, record.DecisionInvalidReason)
 	}
 
 	if record.Decision != nil {
@@ -135,8 +149,12 @@ func runDecisionCommandLocked(cmd *cobra.Command, store localReviewStore, runID 
 		BaselineCommitSHA: record.Baseline,
 	}
 
-	decisionPath := filepath.Join(store.runDir(record.RunID), decisionRecordFileName)
+	decisionPath := store.runDir(record.RunID) + "/" + decisionRecordFileName
 	if err := writeLocalDecisionRecord(decisionPath, decision); err != nil {
+		return err
+	}
+
+	if err := appendLocalDecisionAuditEvent(store, decision); err != nil {
 		return err
 	}
 
@@ -146,6 +164,9 @@ func runDecisionCommandLocked(cmd *cobra.Command, store localReviewStore, runID 
 	fmt.Fprintf(out, "Patch digest: sha256:%s\n", shortValue(decision.PatchSHA256, 12))
 	if decision.BaselineCommitSHA != "" {
 		fmt.Fprintf(out, "Baseline: %s\n", shortValue(decision.BaselineCommitSHA, 12))
+	}
+	if decision.DecidedBy != "" {
+		fmt.Fprintf(out, "Decided by: %s\n", decision.DecidedBy)
 	}
 	if decision.Reason != "" {
 		fmt.Fprintf(out, "Reason: %s\n", decision.Reason)
@@ -159,13 +180,6 @@ func runDecisionCommandLocked(cmd *cobra.Command, store localReviewStore, runID 
 	}
 
 	return nil
-}
-
-func selectRunReviewRecord(store localReviewStore, runID string) (runReviewRecord, error) {
-	if runID == "" {
-		return latestRunReviewRecord(store)
-	}
-	return findRunReviewRecord(store, runID)
 }
 
 func writeLocalDecisionRecord(path string, decision localDecisionRecord) error {
@@ -199,16 +213,81 @@ func readLocalDecisionRecord(path string) (localDecisionRecord, error) {
 	return decision, nil
 }
 
+func appendLocalDecisionAuditEvent(store localReviewStore, decision localDecisionRecord) error {
+	event := localDecisionAuditEvent{
+		Schema:            localDecisionEventSchema,
+		Event:             "local_decision." + decision.Status,
+		RunID:             decision.RunID,
+		Status:            decision.Status,
+		DecidedAt:         decision.DecidedAt,
+		DecidedBy:         decision.DecidedBy,
+		Reason:            decision.Reason,
+		PatchSHA256:       decision.PatchSHA256,
+		BaselineCommitSHA: decision.BaselineCommitSHA,
+	}
+
+	payload, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("encode decision audit event: %w", err)
+	}
+
+	file, err := os.OpenFile(store.auditPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return fmt.Errorf("open decision audit log: %w", err)
+	}
+	defer file.Close()
+
+	if _, err := file.Write(append(payload, '\n')); err != nil {
+		return fmt.Errorf("append decision audit event: %w", err)
+	}
+
+	return nil
+}
+
+func defaultDecisionActor(store localReviewStore) string {
+	email, emailErr := gitOutput(store.trustedRepo, "config", "--get", "user.email")
+	name, nameErr := gitOutput(store.trustedRepo, "config", "--get", "user.name")
+
+	email = strings.TrimSpace(email)
+	name = strings.TrimSpace(name)
+
+	if emailErr == nil && email != "" {
+		if nameErr == nil && name != "" {
+			return name + " <" + email + ">"
+		}
+		return email
+	}
+
+	if nameErr == nil && name != "" {
+		return name
+	}
+
+	for _, key := range []string{"USER", "USERNAME", "LOGNAME"} {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value
+		}
+	}
+
+	return "unknown-local-user"
+}
+
 func decisionStatus(record runReviewRecord) string {
+	if record.DecisionInvalidReason != "" {
+		return "invalid"
+	}
+
 	if record.Decision == nil {
 		return "undecided"
 	}
-	if record.Decision.Schema != "" && record.Decision.Schema != localDecisionSchema {
+
+	if record.Decision.Schema != localDecisionSchema {
 		return "invalid"
 	}
-	if record.Decision.RunID != "" && record.Decision.RunID != record.RunID {
+
+	if record.Decision.RunID != record.RunID {
 		return "invalid"
 	}
+
 	switch record.Decision.Status {
 	case localDecisionApproved, localDecisionRejected:
 		return record.Decision.Status
@@ -218,8 +297,28 @@ func decisionStatus(record runReviewRecord) string {
 }
 
 func renderDecision(out interface{ Write([]byte) (int, error) }, record runReviewRecord) {
+	if record.DecisionInvalidReason != "" {
+		fmt.Fprintln(out, "Decision: invalid")
+		fmt.Fprintln(out, "Decision state: INVALID/CORRUPT")
+		fmt.Fprintf(out, "Decision error: %s\n", record.DecisionInvalidReason)
+		return
+	}
+
 	if record.Decision == nil {
 		fmt.Fprintln(out, "Decision: undecided")
+		return
+	}
+
+	if decisionStatus(record) == "invalid" {
+		fmt.Fprintln(out, "Decision: invalid")
+		fmt.Fprintln(out, "Decision state: INVALID/CORRUPT")
+		fmt.Fprintf(out, "Decision status: %s\n", valueOrDash(record.Decision.Status))
+		if record.Decision.Schema != "" {
+			fmt.Fprintf(out, "Decision schema: %s\n", record.Decision.Schema)
+		}
+		if record.Decision.RunID != "" {
+			fmt.Fprintf(out, "Decision run ID: %s\n", record.Decision.RunID)
+		}
 		return
 	}
 
@@ -239,6 +338,10 @@ func renderDecision(out interface{ Write([]byte) (int, error) }, record runRevie
 }
 
 func validateDecisionRecordForRun(record runReviewRecord) error {
+	if record.DecisionInvalidReason != "" {
+		return fmt.Errorf("decision record for run %s is invalid or corrupt: %s", record.RunID, record.DecisionInvalidReason)
+	}
+
 	if record.Decision == nil {
 		return nil
 	}

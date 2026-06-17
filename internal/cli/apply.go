@@ -82,8 +82,8 @@ func runApplyLocked(cmd *cobra.Command, runID string, opts *applyOptions) error 
 		return err
 	}
 
-	if record.Approval.Required {
-		return fmt.Errorf("run %s still requires approval; refusing to apply without an approval decision", record.RunID)
+	if err := assertDecisionAllowsApply(record); err != nil {
+		return err
 	}
 
 	patchPath := record.PatchPath

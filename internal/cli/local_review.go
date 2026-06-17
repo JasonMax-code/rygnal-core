@@ -52,6 +52,7 @@ type runReviewRecord struct {
 	SummaryPath    string                        `json:"-"`
 	PatchDigest    string                        `json:"patch_digest,omitempty"`
 	Apply          *localApplyRecord             `json:"apply,omitempty"`
+	Decision       *localDecisionRecord          `json:"decision,omitempty"`
 	ArtifactSchema string                        `json:"artifact_schema"`
 }
 
@@ -249,6 +250,10 @@ func listRunReviewRecords(store localReviewStore) ([]runReviewRecord, error) {
 
 		if applyRecord, err := readLocalApplyRecord(filepath.Join(store.runsDir, entry.Name(), applyRecordFileName)); err == nil {
 			record.Apply = &applyRecord
+		}
+
+		if decisionRecord, err := readLocalDecisionRecord(filepath.Join(store.runsDir, entry.Name(), decisionRecordFileName)); err == nil {
+			record.Decision = &decisionRecord
 		}
 
 		records = append(records, record)

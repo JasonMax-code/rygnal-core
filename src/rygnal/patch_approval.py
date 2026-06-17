@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from functools import cached_property
 from typing import Any
 
+from rygnal.approval_state import ApprovalStateMachine
 from rygnal.audit_logger import AuditLogger
 from rygnal.change_gate import GuardedChangeGateDecision, evaluate_guarded_change_gate
 from rygnal.change_risk import ChangeRiskReport, FileRiskClassification, classify_patch_risk
@@ -28,6 +30,9 @@ from rygnal.security import redact_sensitive_value
 
 class PatchApprovalError(RuntimeError):
     """Raised when patch approval state is invalid."""
+
+
+DEFAULT_PATCH_APPROVAL_TTL_SECONDS = 60 * 60
 
 
 @dataclass(frozen=True)
@@ -173,7 +178,7 @@ def approve_patch_request(
         decided_by=decided_by,
         decided_at=utc_now_iso(),
         reason=str(redact_sensitive_value(reason)),
-        metadata={"patch_sha256": approval_request.target},
+        metadata=_decision_binding_metadata(approval_request),
     )
 
 
@@ -193,7 +198,7 @@ def reject_patch_request(
         decided_by=decided_by,
         decided_at=utc_now_iso(),
         reason=str(redact_sensitive_value(reason)),
-        metadata={"patch_sha256": approval_request.target},
+        metadata=_decision_binding_metadata(approval_request),
     )
 
 
@@ -201,7 +206,17 @@ def assert_patch_approval_granted(
     approval_request: ApprovalRequest,
     approval_decision: ApprovalDecision,
     patch_diff: PatchDiff,
+    *,
+    now: datetime | None = None,
+    ttl_seconds: int = DEFAULT_PATCH_APPROVAL_TTL_SECONDS,
 ) -> None:
+    transition = ApprovalStateMachine.validate_transition(
+        current_status=ApprovalStatus.PENDING,
+        next_status=approval_decision.status,
+    )
+    if not transition.allowed:
+        raise PatchApprovalError(transition.reason)
+
     if approval_request.approval_id != approval_decision.approval_id:
         raise PatchApprovalError("Approval decision does not match request.")
 
@@ -210,6 +225,21 @@ def assert_patch_approval_granted(
 
     if approval_decision.metadata.get("patch_sha256") != patch_diff.patch_sha256:
         raise PatchApprovalError("Approval decision is not bound to this patch digest.")
+
+    request_baseline = approval_request.metadata.get("baseline_commit_sha")
+    if request_baseline != patch_diff.baseline_commit_sha:
+        raise PatchApprovalError("Approval request baseline does not match guarded patch.")
+
+    decision_baseline = approval_decision.metadata.get("baseline_commit_sha")
+    if decision_baseline != patch_diff.baseline_commit_sha:
+        raise PatchApprovalError("Approval decision baseline does not match guarded patch.")
+
+    _ensure_patch_approval_not_expired(
+        approval_request,
+        approval_decision,
+        now=now,
+        ttl_seconds=ttl_seconds,
+    )
 
     if approval_decision.status != ApprovalStatus.APPROVED or not approval_decision.approved:
         raise PatchApprovalError("Patch approval was not granted.")
@@ -344,6 +374,69 @@ def _is_low_risk_docs_or_tests(file_risk: FileRiskClassification) -> bool:
 
     reason_codes = {reason.code for reason in file_risk.reasons}
     return bool(reason_codes) and reason_codes <= {"documentation-change", "test-change"}
+
+
+def _decision_binding_metadata(approval_request: ApprovalRequest) -> dict[str, Any]:
+    metadata: dict[str, Any] = {"patch_sha256": approval_request.target}
+
+    baseline_commit_sha = approval_request.metadata.get("baseline_commit_sha")
+    if isinstance(baseline_commit_sha, str) and baseline_commit_sha.strip():
+        metadata["baseline_commit_sha"] = baseline_commit_sha
+
+    return metadata
+
+
+def _ensure_patch_approval_not_expired(
+    approval_request: ApprovalRequest,
+    approval_decision: ApprovalDecision,
+    *,
+    now: datetime | None,
+    ttl_seconds: int,
+) -> None:
+    if ttl_seconds <= 0:
+        raise PatchApprovalError("Patch approval TTL must be positive.")
+
+    created_at = _parse_approval_timestamp(
+        approval_request.created_at,
+        field_name="approval request creation time",
+    )
+
+    if approval_decision.decided_at is None:
+        raise PatchApprovalError("Approval decision time is required.")
+
+    decided_at = _parse_approval_timestamp(
+        approval_decision.decided_at,
+        field_name="approval decision time",
+    )
+    current_time = (now or datetime.now(UTC)).astimezone(UTC)
+
+    if decided_at < created_at:
+        raise PatchApprovalError("Approval decision predates approval request.")
+
+    if created_at > current_time:
+        raise PatchApprovalError("Approval request creation time is in the future.")
+
+    if decided_at > current_time:
+        raise PatchApprovalError("Approval decision time is in the future.")
+
+    if (current_time - created_at).total_seconds() > ttl_seconds:
+        raise PatchApprovalError("Patch approval is stale or expired.")
+
+
+def _parse_approval_timestamp(value: str, *, field_name: str) -> datetime:
+    normalized = value.strip()
+    if normalized.endswith("Z"):
+        normalized = f"{normalized[:-1]}+00:00"
+
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise PatchApprovalError(f"Invalid {field_name}.") from exc
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+
+    return parsed.astimezone(UTC)
 
 
 def _validate_decision_context(

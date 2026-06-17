@@ -1,33 +1,12 @@
+mod ast;
+mod models;
+mod subjective;
+
+use crate::models::{AgentAction, GitPatch, RiskAssessment, SubjectiveRiskInput};
+use crate::subjective::evaluate_subjective_risk as evaluate_subjective_risk_inner;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use serde::{Deserialize, Serialize};
 use tree_sitter::Parser;
-
-#[derive(Deserialize, Debug)]
-struct FileChange {
-    path: String,
-    kind: String,
-}
-
-#[derive(Deserialize, Debug)]
-struct GitPatch {
-    sha256: String,
-    changes: Vec<FileChange>,
-}
-
-#[derive(Deserialize, Debug)]
-struct AgentAction {
-    file_path: String,
-    action_type: String,
-    raw_code: String,
-}
-
-#[derive(Serialize, Debug)]
-struct RiskAssessment {
-    criticality_index: f64,
-    risk_level: String,
-    reasons: Vec<String>,
-}
 
 #[pyfunction]
 fn verify_bridge(payload: String) -> PyResult<String> {
@@ -147,11 +126,30 @@ fn evaluate_agent_action(json_payload: String) -> PyResult<String> {
         .map_err(|err| PyValueError::new_err(format!("Failed to serialize assessment: {}", err)))
 }
 
+#[pyfunction]
+fn evaluate_subjective_risk(json_payload: String) -> PyResult<String> {
+    let input: SubjectiveRiskInput = serde_json::from_str(&json_payload).map_err(|err| {
+        PyValueError::new_err(format!("Invalid subjective risk payload: {}", err))
+    })?;
+
+    let assessment = evaluate_subjective_risk_inner(&input).map_err(|err| {
+        PyValueError::new_err(format!("Subjective risk evaluation failed: {}", err))
+    })?;
+
+    serde_json::to_string(&assessment).map_err(|err| {
+        PyValueError::new_err(format!(
+            "Failed to serialize subjective risk assessment: {}",
+            err
+        ))
+    })
+}
+
 #[pymodule]
 fn rygnal_kernel(_py: Python, module: &PyModule) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(verify_bridge, module)?)?;
     module.add_function(wrap_pyfunction!(evaluate_patch_risk, module)?)?;
     module.add_function(wrap_pyfunction!(analyze_code_structure, module)?)?;
     module.add_function(wrap_pyfunction!(evaluate_agent_action, module)?)?;
+    module.add_function(wrap_pyfunction!(evaluate_subjective_risk, module)?)?;
     Ok(())
 }

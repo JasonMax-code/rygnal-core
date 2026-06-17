@@ -700,3 +700,60 @@ def test_critical_secret_patch_is_blocked_before_completion(tmp_path: Path) -> N
     assert result.cleanup_performed is True
     assert not Path(result.workspace_path).exists()
     assert audit.verify_integrity()
+
+
+def test_subjective_locked_file_blocks_guarded_patch(tmp_path: Path) -> None:
+    repo = create_repo(tmp_path / "repo")
+    audit = AuditLogger(tmp_path / "audit.jsonl")
+
+    locked_file = repo / "src" / "payment.py"
+    locked_file.parent.mkdir()
+    locked_file.write_text(
+        "# rygnal:lock\ndef charge():\n    return True\n",
+        encoding="utf-8",
+    )
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "add locked payment code")
+
+    result = run_guarded(
+        unsafe_config(
+            repo,
+            py_command(
+                "from pathlib import Path; "
+                "Path('src/payment.py').write_text("
+                "'# rygnal:lock\\n"
+                "def charge():\\n"
+                "    return False\\n'"
+                ")"
+            ),
+            audit_logger=audit,
+        )
+    )
+
+    assert result.status == GuardedRunStatus.BLOCKED
+    assert result.patch_diff is not None
+    assert result.approval_request is None
+    assert result.change_risk_report is not None
+    assert result.change_risk_report.overall_risk_level == RiskLevel.CRITICAL
+    assert result.blocked_reason is not None
+    assert "critical risk" in result.blocked_reason
+
+    report_reason_codes = {reason.code for reason in result.change_risk_report.report_reasons}
+    assert "subjective-human-context-risk" in report_reason_codes
+
+    subjective_reason = next(
+        reason
+        for reason in result.change_risk_report.report_reasons
+        if reason.code == "subjective-human-context-risk"
+    )
+    evidence = dict(subjective_reason.evidence)
+
+    assert evidence["path"] == "src/payment.py"
+    assert evidence["judgment"] == "block"
+    assert evidence["total_criticality"] == 10.0
+
+    assert "guarded_run.patch_blocked" in audit_actions(audit)
+    assert "guarded_run.patch_approval_required" not in audit_actions(audit)
+    assert result.cleanup_performed is True
+    assert not Path(result.workspace_path).exists()
+    assert audit.verify_integrity()

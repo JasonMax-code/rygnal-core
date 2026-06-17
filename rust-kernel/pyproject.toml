@@ -1,0 +1,15 @@
+[build-system]
+requires = ["maturin>=1.8,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "rygnal-kernel"
+version = "0.1.0"
+description = "Rust safety kernel Python extension for Rygnal"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+[tool.maturin]
+bindings = "pyo3"
+module-name = "rygnal_kernel"
+manifest-path = "Cargo.toml"

@@ -5,6 +5,7 @@ allowed, blocked, simulated, or sent for human approval.
 """
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,30 @@ class PolicyLoadError(ValueError):
     """Raised when a policy file violates a safety invariant."""
 
 
+@dataclass(frozen=True)
+class PolicyValidationProfile:
+    """Safety invariants applied while loading a policy file.
+
+    General test/custom policies may choose different defaults, but production
+    profiles must make fail-closed behavior explicit and auditable.
+    """
+
+    name: str
+    fail_closed_default: bool = False
+    require_terminal_catch_all: bool = False
+    terminal_disallowed_decisions: tuple[Decision, ...] = (
+        Decision.ALLOW,
+        Decision.SIMULATE,
+    )
+
+
+PRODUCTION_SAFE_POLICY_PROFILE = PolicyValidationProfile(
+    name="production-safe",
+    fail_closed_default=True,
+    require_terminal_catch_all=True,
+)
+
+
 class PolicyEngine:
     """Evaluate AI-agent tool requests against policy rules."""
 
@@ -43,7 +68,12 @@ class PolicyEngine:
         self.rules = sorted(rules or [], key=lambda rule: rule.priority)
 
     @classmethod
-    def from_file(cls, policy_path: str | Path) -> "PolicyEngine":
+    def from_file(
+        cls,
+        policy_path: str | Path,
+        *,
+        validation_profile: PolicyValidationProfile | None = None,
+    ) -> "PolicyEngine":
         """Load policy rules from a YAML file."""
         path = Path(policy_path)
 
@@ -56,7 +86,10 @@ class PolicyEngine:
             raise ValueError("Policy file must be a YAML mapping.")
 
         policy_schema = PolicySchema(**data)
-        cls._validate_policy_schema(policy_schema)
+        cls._validate_policy_schema(
+            policy_schema,
+            validation_profile=validation_profile,
+        )
 
         return cls(
             rules=policy_schema.rules,
@@ -65,7 +98,11 @@ class PolicyEngine:
         )
 
     @staticmethod
-    def _validate_policy_schema(policy_schema: PolicySchema) -> None:
+    def _validate_policy_schema(
+        policy_schema: PolicySchema,
+        *,
+        validation_profile: PolicyValidationProfile | None = None,
+    ) -> None:
         """Validate policy-level safety invariants before runtime evaluation."""
         seen_rule_ids: set[str] = set()
 
@@ -86,6 +123,69 @@ class PolicyEngine:
                     raise PolicyLoadError(
                         f"Invalid regex in policy rule '{rule.id}' field '{field_name}': {exc}"
                     ) from exc
+
+        if validation_profile is None:
+            return
+
+        PolicyEngine._validate_profile_default(policy_schema, validation_profile)
+
+        if validation_profile.require_terminal_catch_all:
+            PolicyEngine._validate_terminal_catch_all(policy_schema, validation_profile)
+
+    @staticmethod
+    def _validate_profile_default(
+        policy_schema: PolicySchema,
+        validation_profile: PolicyValidationProfile,
+    ) -> None:
+        if not validation_profile.fail_closed_default:
+            return
+
+        if policy_schema.default_decision in {Decision.ALLOW, Decision.SIMULATE}:
+            raise PolicyLoadError(
+                f"{validation_profile.name} policy must be fail-closed. "
+                "default_decision must not allow or simulate unmatched actions."
+            )
+
+    @staticmethod
+    def _validate_terminal_catch_all(
+        policy_schema: PolicySchema,
+        validation_profile: PolicyValidationProfile,
+    ) -> None:
+        terminal_rules = [
+            rule for rule in policy_schema.rules if PolicyEngine._is_terminal_catch_all_rule(rule)
+        ]
+
+        if not terminal_rules:
+            raise PolicyLoadError(
+                f"{validation_profile.name} policy must define an explicit terminal catch-all rule."
+            )
+
+        if len(terminal_rules) > 1:
+            raise PolicyLoadError(
+                f"{validation_profile.name} policy must define exactly one terminal catch-all rule."
+            )
+
+        terminal_rule = terminal_rules[0]
+
+        if terminal_rule.decision in validation_profile.terminal_disallowed_decisions:
+            raise PolicyLoadError(
+                f"{validation_profile.name} terminal catch-all rule must not allow "
+                "or simulate unmatched actions."
+            )
+
+        for rule in policy_schema.rules:
+            if rule.id == terminal_rule.id:
+                continue
+
+            if rule.priority >= terminal_rule.priority:
+                raise PolicyLoadError(
+                    f"{validation_profile.name} terminal catch-all rule must have "
+                    "lowest precedence."
+                )
+
+    @staticmethod
+    def _is_terminal_catch_all_rule(rule: PolicyRule) -> bool:
+        return not PolicyEngine._matched_conditions(rule)
 
     def evaluate(
         self,
@@ -305,7 +405,10 @@ def load_default_policy_engine(
     mode = RuntimeMode(runtime_mode)
 
     if mode == RuntimeMode.PRODUCTION_SAFE:
-        return PolicyEngine.from_file(PRODUCTION_SAFE_POLICY_PATH)
+        return PolicyEngine.from_file(
+            PRODUCTION_SAFE_POLICY_PATH,
+            validation_profile=PRODUCTION_SAFE_POLICY_PROFILE,
+        )
 
     engine = PolicyEngine.from_file(DEFAULT_POLICY_PATH)
 

@@ -44,3 +44,9 @@ rules:
     decision: simulate
     severity: medium
     reason: "External API sends are simulated in production-safe mode."
+
+  - id: production-safe-terminal-approval
+    priority: 1000
+    decision: require_approval
+    severity: high
+    reason: "Unknown or unmatched actions require human approval in production-safe mode."

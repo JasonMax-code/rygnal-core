@@ -18,10 +18,12 @@ import (
 )
 
 type runOptions struct {
-	unsafeLocal bool
-	jsonMode    bool
-	debugMode   bool
-	timeoutSec  int
+	unsafeLocal    bool
+	jsonMode       bool
+	debugMode      bool
+	promptApproval bool
+	timeoutSec     int
+	promptTimeout  time.Duration
 }
 
 type runDependencies struct {
@@ -29,6 +31,7 @@ type runDependencies struct {
 	resolveGitRoot    func() (string, error)
 	resolveEngineRoot func() (string, error)
 	newRequestID      func() (string, error)
+	isTerminal        func() bool
 }
 
 func defaultRunDependencies() runDependencies {
@@ -37,6 +40,7 @@ func defaultRunDependencies() runDependencies {
 		resolveGitRoot:    resolveGitRoot,
 		resolveEngineRoot: resolveEngineRoot,
 		newRequestID:      newRequestID,
+		isTerminal:        defaultApprovalPromptIsTerminal,
 	}
 }
 
@@ -86,6 +90,18 @@ arguments passed down to the target agent.`,
 		300,
 		"Maximum process execution runtime context duration in seconds",
 	)
+	cmd.Flags().BoolVar(
+		&opts.promptApproval,
+		"prompt-approval",
+		false,
+		"Prompt interactively for approve/reject when a run requires approval",
+	)
+	cmd.Flags().DurationVar(
+		&opts.promptTimeout,
+		"prompt-timeout",
+		120*time.Second,
+		"Maximum time to wait for an interactive approval decision",
+	)
 
 	return cmd
 }
@@ -102,6 +118,14 @@ func validateRunArgs(cmd *cobra.Command, args []string, opts *runOptions) error 
 
 	if opts.timeoutSec <= 0 {
 		return errors.New("invalid CLI syntax: --timeout must be greater than zero")
+	}
+
+	if opts.promptApproval && opts.jsonMode {
+		return errors.New("invalid CLI syntax: --prompt-approval cannot be used with --json")
+	}
+
+	if opts.promptApproval && opts.promptTimeout <= 0 {
+		return errors.New("invalid CLI syntax: --prompt-timeout must be greater than zero")
 	}
 
 	return nil
@@ -174,10 +198,22 @@ func runExecutionPipeline(
 		return err
 	}
 
+	promptDecisionWritten := false
+
 	if !opts.jsonMode {
 		if err := persistRunReviewArtifact(repoRoot, requestID, result.LastEvent); err != nil {
 			return err
 		}
+
+		prompted, err := maybePromptForApproval(cmd, opts, store, result.LastEvent, deps)
+		if err != nil {
+			return err
+		}
+		promptDecisionWritten = prompted
+	}
+
+	if promptDecisionWritten {
+		return nil
 	}
 
 	return exitErrorForLastEvent(result.LastEvent)

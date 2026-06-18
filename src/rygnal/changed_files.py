@@ -127,7 +127,7 @@ def detect_changed_files(
         raise ChangedFileDetectionError(f"Guarded workspace does not exist: {workspace}")
 
     raw_diff = _run_git(
-        ["diff", "--raw", "-z", "-M", baseline, "--"],
+        ["diff", "--raw", "-z", "-M20%", baseline, "--"],
         cwd=workspace,
     )
     untracked_output = _run_git(
@@ -158,7 +158,7 @@ def detect_changed_files(
 
 
 def parse_git_raw_diff(raw_output: bytes) -> tuple[ChangedFile, ...]:
-    """Parse `git diff --raw -z -M` output."""
+    """Parse `git diff --raw -z -M20%` output."""
 
     if not raw_output:
         return ()

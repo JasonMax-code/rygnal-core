@@ -356,7 +356,7 @@ def _patch_args(baseline_commit_sha: str) -> list[str]:
         "--no-textconv",
         "--default-prefix",
         "--diff-algorithm=default",
-        "-M",
+        "-M20%",
         baseline_commit_sha,
         "--",
     ]
@@ -371,7 +371,7 @@ def _numstat_args(baseline_commit_sha: str) -> list[str]:
         "--no-ext-diff",
         "--no-textconv",
         "--diff-algorithm=default",
-        "-M",
+        "-M20%",
         baseline_commit_sha,
         "--",
     ]

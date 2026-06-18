@@ -258,9 +258,7 @@ def test_rust_kernel_evaluates_criticality_bridge() -> None:
         "file_path": "src/service.py",
         "action_type": "modified",
         "old_code": (
-            "def important_business_rule():\n"
-            "    account_limit = 100\n"
-            "    return account_limit\n"
+            "def important_business_rule():\n    account_limit = 100\n    return account_limit\n"
         ),
         "new_code": "def replacement():\n    return 1\n",
     }
@@ -329,5 +327,16 @@ def test_rust_kernel_criticality_rejects_unsafe_path() -> None:
         "new_code": "def new(): pass\n",
     }
 
-    with pytest.raises(ValueError, match="Criticality evaluation failed"):
+    with pytest.raises(rygnal_kernel.CriticalityEvaluationError) as exc_info:
         rygnal_kernel.evaluate_criticality(json.dumps(payload))
+
+    error_payload = json.loads(exc_info.value.args[0])
+
+    assert error_payload["error_code"] == "parent-traversal"
+    assert error_payload["reason"]
+
+
+def test_rust_kernel_exports_criticality_exception() -> None:
+    rygnal_kernel = pytest.importorskip("rygnal_kernel")
+
+    assert issubclass(rygnal_kernel.CriticalityEvaluationError, Exception)

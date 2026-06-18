@@ -4,14 +4,17 @@ mod models;
 mod path_safety;
 mod subjective;
 
-use crate::criticality::evaluate_criticality as evaluate_criticality_inner;
+use crate::criticality::{evaluate_criticality as evaluate_criticality_inner, CriticalityError};
 use crate::models::{AgentAction, CriticalityInput, GitPatch, RiskAssessment, SubjectiveRiskInput};
 use crate::path_safety::{PathSensitivity, PathValidationOutcome};
 use crate::subjective::evaluate_subjective_risk as evaluate_subjective_risk_inner;
-use pyo3::exceptions::PyValueError;
+use pyo3::create_exception;
+use pyo3::exceptions::{PyException, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use tree_sitter::Parser;
+
+create_exception!(rygnal_kernel, CriticalityEvaluationError, PyException);
 
 #[pyfunction]
 fn verify_bridge(payload: String) -> PyResult<String> {
@@ -189,12 +192,11 @@ fn evaluate_agent_action(json_payload: String) -> PyResult<String> {
 }
 
 #[pyfunction]
-fn evaluate_criticality(json_payload: String) -> PyResult<String> {
-    let input: CriticalityInput = serde_json::from_str(&json_payload)
+fn evaluate_criticality(json_payload: &str) -> PyResult<String> {
+    let input: CriticalityInput = serde_json::from_str(json_payload)
         .map_err(|err| PyValueError::new_err(format!("Invalid criticality payload: {}", err)))?;
 
-    let assessment = evaluate_criticality_inner(&input)
-        .map_err(|err| PyValueError::new_err(format!("Criticality evaluation failed: {}", err)))?;
+    let assessment = evaluate_criticality_inner(&input).map_err(criticality_error_to_py_error)?;
 
     serde_json::to_string(&assessment).map_err(|err| {
         PyValueError::new_err(format!(
@@ -202,6 +204,25 @@ fn evaluate_criticality(json_payload: String) -> PyResult<String> {
             err
         ))
     })
+}
+
+fn criticality_error_to_py_error(err: CriticalityError) -> PyErr {
+    let error_json = serde_json::json!({
+        "error_code": criticality_error_code(&err),
+        "reason": err.to_string(),
+    })
+    .to_string();
+
+    CriticalityEvaluationError::new_err(error_json)
+}
+
+fn criticality_error_code(err: &CriticalityError) -> &'static str {
+    match err {
+        CriticalityError::InvalidPath(path_error) => path_error.code(),
+        CriticalityError::InvalidPathCategory(_) => "invalid-path-category",
+        CriticalityError::InvalidPathSeverity(_) => "invalid-path-severity",
+        CriticalityError::Ast(_) => "ast-analysis-failed",
+    }
 }
 
 #[pyfunction]
@@ -223,7 +244,11 @@ fn evaluate_subjective_risk(json_payload: String) -> PyResult<String> {
 }
 
 #[pymodule]
-fn rygnal_kernel(_py: Python, module: &PyModule) -> PyResult<()> {
+fn rygnal_kernel(py: Python, module: &PyModule) -> PyResult<()> {
+    module.add(
+        "CriticalityEvaluationError",
+        py.get_type::<CriticalityEvaluationError>(),
+    )?;
     module.add_function(wrap_pyfunction!(verify_bridge, module)?)?;
     module.add_function(wrap_pyfunction!(engine_version, module)?)?;
     module.add_function(wrap_pyfunction!(validate_repo_relative_path, module)?)?;

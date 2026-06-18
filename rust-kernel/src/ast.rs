@@ -379,5 +379,4 @@ def stable():
             other => panic!("expected AstTooLarge, got {other:?}"),
         }
     }
-
 }

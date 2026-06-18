@@ -41,6 +41,12 @@ RISK_LEVEL_ORDER: dict[RiskLevel, int] = {
     RiskLevel.CRITICAL: 3,
 }
 
+RUST_CRITICALITY_ENFORCED_LEVELS: dict[str, RiskLevel] = {
+    "high": RiskLevel.HIGH,
+    "critical": RiskLevel.CRITICAL,
+}
+
+MIN_ENFORCED_CRITICALITY_INDEX = 5.0
 MAX_CRITICALITY_SHADOW_BYTES = 1_000_000
 
 
@@ -449,12 +455,16 @@ def _attach_criticality_shadow(
     file_risk: FileRiskClassification,
     rust_criticality: RustCriticalityShadow,
 ) -> FileRiskClassification:
+    rust_reason = _rust_criticality_risk_reason(file_risk, rust_criticality)
+    reasons = (*file_risk.reasons, rust_reason) if rust_reason else file_risk.reasons
+    risk_level = _highest_risk(reason.risk_level for reason in reasons)
+
     return FileRiskClassification(
         path=file_risk.path,
         old_path=file_risk.old_path,
         kind=file_risk.kind,
-        risk_level=file_risk.risk_level,
-        reasons=file_risk.reasons,
+        risk_level=risk_level,
+        reasons=reasons,
         additions=file_risk.additions,
         deletions=file_risk.deletions,
         binary=file_risk.binary,
@@ -497,6 +507,45 @@ def classify_patch_file_risk(
         old_mode=file_diff.old_mode,
         new_mode=file_diff.new_mode,
         mode_changed=file_diff.mode_changed,
+    )
+
+
+def _rust_criticality_risk_reason(
+    file_risk: FileRiskClassification,
+    rust_criticality: RustCriticalityShadow,
+) -> ChangeRiskReason | None:
+    if not rust_criticality.available:
+        return None
+
+    if rust_criticality.risk_level is None:
+        return None
+
+    if rust_criticality.criticality_index is None:
+        return None
+
+    if rust_criticality.criticality_index < MIN_ENFORCED_CRITICALITY_INDEX:
+        return None
+
+    rust_risk_level = RUST_CRITICALITY_ENFORCED_LEVELS.get(
+        rust_criticality.risk_level.strip().lower()
+    )
+    if rust_risk_level is None:
+        return None
+
+    if RISK_LEVEL_ORDER[rust_risk_level] <= RISK_LEVEL_ORDER[file_risk.risk_level]:
+        return None
+
+    return _reason(
+        "rust-criticality-signal",
+        rust_risk_level,
+        "Rust criticality analysis reported higher semantic or file risk.",
+        {
+            "path": file_risk.path,
+            "criticality_index": rust_criticality.criticality_index,
+            "rust_risk_level": rust_criticality.risk_level,
+            "path_category": rust_criticality.path_category or "",
+            "path_severity": rust_criticality.path_severity or "",
+        },
     )
 
 
@@ -1004,7 +1053,9 @@ __all__ = [
     "ChangeRiskReport",
     "FileRiskClassification",
     "MAX_CRITICALITY_SHADOW_BYTES",
+    "MIN_ENFORCED_CRITICALITY_INDEX",
     "RISK_LEVEL_ORDER",
+    "RUST_CRITICALITY_ENFORCED_LEVELS",
     "RustCriticalityShadow",
     "classify_patch_file_risk",
     "classify_patch_risk",

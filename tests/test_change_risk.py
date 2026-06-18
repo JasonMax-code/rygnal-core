@@ -259,7 +259,7 @@ def test_common_credential_paths_are_critical(tmp_path: Path) -> None:
         )
 
 
-def test_rust_criticality_shadow_success_is_attached_without_changing_risk(
+def test_rust_criticality_available_critical_result_raises_medium_python_risk(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -296,8 +296,9 @@ def test_rust_criticality_shadow_success_is_attached_without_changing_risk(
     report = classify_repo_changes(repo)
 
     file_risk = risk_for_path(report, "src/app.py")
-    assert file_risk.risk_level == RiskLevel.MEDIUM
-    assert report.overall_risk_level == RiskLevel.MEDIUM
+    assert file_risk.risk_level == RiskLevel.CRITICAL
+    assert report.overall_risk_level == RiskLevel.CRITICAL
+    assert any(reason.code == "rust-criticality-signal" for reason in file_risk.reasons)
 
     shadow = file_risk.audit_summary["rust_criticality"]
     assert shadow["available"] is True
@@ -305,12 +306,12 @@ def test_rust_criticality_shadow_success_is_attached_without_changing_risk(
     assert shadow["risk_level"] == "critical"
     assert shadow["reasons"] == ("shadow-only criticality",)
 
-    assert file_risk.risk_level == RiskLevel.MEDIUM
-    assert report.overall_risk_level == RiskLevel.MEDIUM
-    assert report.risk_counts["medium"] == 1
+    assert file_risk.risk_level == RiskLevel.CRITICAL
+    assert report.overall_risk_level == RiskLevel.CRITICAL
+    assert report.risk_counts["critical"] == 1
 
 
-def test_rust_criticality_shadow_high_result_does_not_mutate_python_risk(
+def test_rust_criticality_available_critical_result_raises_low_python_risk(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -344,12 +345,14 @@ def test_rust_criticality_shadow_high_result_does_not_mutate_python_risk(
 
     shadow_report = classify_repo_changes(repo)
 
-    assert shadow_report.overall_risk_level == python_only_report.overall_risk_level
-    assert shadow_report.risk_counts == python_only_report.risk_counts
+    assert python_only_report.overall_risk_level == RiskLevel.LOW
+    assert shadow_report.overall_risk_level == RiskLevel.CRITICAL
+    assert shadow_report.risk_counts["critical"] == 1
 
     file_risk = risk_for_path(shadow_report, "docs/usage.md")
-    assert file_risk.risk_level == RiskLevel.LOW
+    assert file_risk.risk_level == RiskLevel.CRITICAL
     assert file_risk.audit_summary["rust_criticality"]["risk_level"] == "critical"
+    assert any(reason.code == "rust-criticality-signal" for reason in file_risk.reasons)
 
 
 def test_rust_criticality_shadow_missing_kernel_does_not_crash(
@@ -695,3 +698,155 @@ def test_rust_criticality_shadow_content_unavailable_does_not_crash(
     assert shadow["available"] is False
     assert shadow["error_code"] == "content-unavailable"
     assert "file contents could not be loaded" in shadow["error_reason"]
+
+
+def test_rust_criticality_medium_result_does_not_raise_python_risk(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from rygnal.rust_kernel import RustCriticalityAssessment, RustSemanticMetrics
+
+    repo = create_repo(tmp_path)
+    docs = repo / "docs"
+    docs.mkdir()
+    (docs / "usage.md").write_text("Usage\n", encoding="utf-8")
+
+    def fake_evaluate(criticality_input):
+        return RustCriticalityAssessment(
+            criticality_index=7.0,
+            risk_level="medium",
+            reasons=("medium shadow signal",),
+            semantic_metrics=RustSemanticMetrics(
+                old_node_count=0,
+                new_node_count=1,
+                old_token_count=0,
+                new_token_count=1,
+                matched_node_count=0,
+                survival_ratio=1.0,
+            ),
+            path_category="docs",
+            path_severity="low",
+        )
+
+    monkeypatch.setattr("rygnal.change_risk.evaluate_criticality", fake_evaluate)
+
+    report = classify_repo_changes(repo)
+    file_risk = risk_for_path(report, "docs/usage.md")
+
+    assert file_risk.risk_level == RiskLevel.LOW
+    assert report.overall_risk_level == RiskLevel.LOW
+    assert not any(reason.code == "rust-criticality-signal" for reason in file_risk.reasons)
+
+
+def test_rust_criticality_low_result_never_downgrades_python_critical_risk(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from rygnal.rust_kernel import RustCriticalityAssessment, RustSemanticMetrics
+
+    repo = create_repo(tmp_path)
+    (repo / ".env").write_text("AWS_ACCESS_KEY_ID=AKIA1234567890ABCDEF\n", encoding="utf-8")
+
+    def fake_evaluate(criticality_input):
+        return RustCriticalityAssessment(
+            criticality_index=1.0,
+            risk_level="low",
+            reasons=("low shadow signal",),
+            semantic_metrics=RustSemanticMetrics(
+                old_node_count=0,
+                new_node_count=1,
+                old_token_count=0,
+                new_token_count=1,
+                matched_node_count=0,
+                survival_ratio=1.0,
+            ),
+            path_category="secret",
+            path_severity="critical",
+        )
+
+    monkeypatch.setattr("rygnal.change_risk.evaluate_criticality", fake_evaluate)
+
+    report = classify_repo_changes(repo)
+    file_risk = risk_for_path(report, ".env")
+
+    assert file_risk.risk_level == RiskLevel.CRITICAL
+    assert report.overall_risk_level == RiskLevel.CRITICAL
+    assert any(reason.code == "security-sensitive-path" for reason in file_risk.reasons)
+    assert not any(reason.code == "rust-criticality-signal" for reason in file_risk.reasons)
+
+
+def test_rust_criticality_unknown_risk_level_does_not_raise_python_risk(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from rygnal.rust_kernel import RustCriticalityAssessment, RustSemanticMetrics
+
+    repo = create_repo(tmp_path)
+    docs = repo / "docs"
+    docs.mkdir()
+    (docs / "usage.md").write_text("Usage\n", encoding="utf-8")
+
+    def fake_evaluate(criticality_input):
+        return RustCriticalityAssessment(
+            criticality_index=9.0,
+            risk_level="severe",
+            reasons=("unknown shadow signal",),
+            semantic_metrics=RustSemanticMetrics(
+                old_node_count=0,
+                new_node_count=1,
+                old_token_count=0,
+                new_token_count=1,
+                matched_node_count=0,
+                survival_ratio=1.0,
+            ),
+            path_category="docs",
+            path_severity="low",
+        )
+
+    monkeypatch.setattr("rygnal.change_risk.evaluate_criticality", fake_evaluate)
+
+    report = classify_repo_changes(repo)
+    file_risk = risk_for_path(report, "docs/usage.md")
+
+    assert file_risk.risk_level == RiskLevel.LOW
+    assert report.overall_risk_level == RiskLevel.LOW
+    assert not any(reason.code == "rust-criticality-signal" for reason in file_risk.reasons)
+
+
+def test_rust_criticality_ghost_critical_with_low_index_does_not_raise_python_risk(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from rygnal.rust_kernel import RustCriticalityAssessment, RustSemanticMetrics
+
+    repo = create_repo(tmp_path)
+    docs = repo / "docs"
+    docs.mkdir()
+    (docs / "usage.md").write_text("Usage\n", encoding="utf-8")
+
+    def fake_evaluate(criticality_input):
+        return RustCriticalityAssessment(
+            criticality_index=0.0,
+            risk_level="critical",
+            reasons=(),
+            semantic_metrics=RustSemanticMetrics(
+                old_node_count=0,
+                new_node_count=1,
+                old_token_count=0,
+                new_token_count=1,
+                matched_node_count=0,
+                survival_ratio=1.0,
+            ),
+            path_category="docs",
+            path_severity="low",
+        )
+
+    monkeypatch.setattr("rygnal.change_risk.evaluate_criticality", fake_evaluate)
+
+    report = classify_repo_changes(repo)
+    file_risk = risk_for_path(report, "docs/usage.md")
+
+    assert file_risk.risk_level == RiskLevel.LOW
+    assert report.overall_risk_level == RiskLevel.LOW
+    assert file_risk.audit_summary["rust_criticality"]["risk_level"] == "critical"
+    assert not any(reason.code == "rust-criticality-signal" for reason in file_risk.reasons)

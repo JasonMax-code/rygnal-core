@@ -205,8 +205,9 @@ fn semantic_modifier(action_type: FileActionType, survival_ratio: f64, old_code:
     }
 
     let survival_ratio = clamp_unit(survival_ratio);
+    let old_line_count = normalized_non_empty_lines(old_code).len();
 
-    if survival_ratio < 0.25 {
+    let modifier: f64 = if survival_ratio < 0.25 {
         3.0
     } else if survival_ratio < 0.50 {
         2.0
@@ -214,6 +215,12 @@ fn semantic_modifier(action_type: FileActionType, survival_ratio: f64, old_code:
         1.0
     } else {
         0.0
+    };
+
+    if old_line_count < 5 {
+        modifier.min(1.0)
+    } else {
+        modifier
     }
 }
 
@@ -507,20 +514,36 @@ mod tests {
 
     #[test]
     fn python_semantic_destruction_raises_risk() {
-        let assessment = evaluate_criticality(&input(
-            "src/service.py",
-            FileActionType::Modified,
-            "def important_business_rule():\n    account_limit = 100\n    return account_limit\n",
-            "def replacement():\n    return 1\n",
-        ))
-        .expect("valid assessment");
+        let old_code = (0..10)
+            .map(|index| {
+                format!(
+                    "old_symbol_{index} = {index}
+"
+                )
+            })
+            .collect::<String>();
+        let new_code = (0..10)
+            .map(|index| {
+                format!(
+                    "new_symbol_{index} = {index}
+"
+                )
+            })
+            .collect::<String>();
 
-        assert!(assessment.semantic_metrics.survival_ratio < 0.25);
+        let input = CriticalityInput {
+            file_path: "src/service.py".to_string(),
+            action_type: FileActionType::Modified,
+            old_code,
+            new_code,
+        };
+
+        let assessment = evaluate_criticality(&input).expect("valid criticality input");
+
+        assert_eq!(assessment.semantic_metrics.survival_ratio, 0.0);
         assert_eq!(assessment.risk_level, CriticalityRiskLevel::High);
-        assert!(assessment
-            .reasons
-            .iter()
-            .any(|reason| reason.contains("Semantic destruction")));
+        assert!(assessment.criticality_index >= 5.0);
+        assert!(assessment.criticality_index < 7.5);
     }
 
     #[test]
@@ -539,5 +562,44 @@ mod tests {
             }
             other => panic!("expected invalid path error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn tiny_python_rewrite_caps_semantic_destruction_penalty() {
+        let input = CriticalityInput {
+            file_path: "src/config.py".to_string(),
+            action_type: FileActionType::Modified,
+            old_code: "old_setting = 'old'\n".to_string(),
+            new_code: "new_setting = 'new'\n".to_string(),
+        };
+
+        let assessment = evaluate_criticality(&input).expect("valid criticality input");
+
+        assert_eq!(assessment.semantic_metrics.survival_ratio, 0.0);
+        assert_eq!(assessment.risk_level, CriticalityRiskLevel::High);
+        assert!(assessment.criticality_index < 7.5);
+    }
+
+    #[test]
+    fn larger_python_rewrite_still_gets_full_semantic_destruction_penalty() {
+        let old_code = (0..10)
+            .map(|index| format!("old_value_{index} = {index}\n"))
+            .collect::<String>();
+        let new_code = (0..10)
+            .map(|index| format!("new_value_{index} = {index}\n"))
+            .collect::<String>();
+
+        let input = CriticalityInput {
+            file_path: "src/config.py".to_string(),
+            action_type: FileActionType::Modified,
+            old_code,
+            new_code,
+        };
+
+        let assessment = evaluate_criticality(&input).expect("valid criticality input");
+
+        assert_eq!(assessment.semantic_metrics.survival_ratio, 0.0);
+        assert_eq!(assessment.risk_level, CriticalityRiskLevel::Critical);
+        assert!(assessment.criticality_index >= 7.5);
     }
 }

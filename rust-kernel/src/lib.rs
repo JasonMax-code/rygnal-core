@@ -4,7 +4,8 @@ mod models;
 mod path_safety;
 mod subjective;
 
-use crate::models::{AgentAction, GitPatch, RiskAssessment, SubjectiveRiskInput};
+use crate::criticality::evaluate_criticality as evaluate_criticality_inner;
+use crate::models::{AgentAction, CriticalityInput, GitPatch, RiskAssessment, SubjectiveRiskInput};
 use crate::path_safety::{PathSensitivity, PathValidationOutcome};
 use crate::subjective::evaluate_subjective_risk as evaluate_subjective_risk_inner;
 use pyo3::exceptions::PyValueError;
@@ -188,6 +189,22 @@ fn evaluate_agent_action(json_payload: String) -> PyResult<String> {
 }
 
 #[pyfunction]
+fn evaluate_criticality(json_payload: String) -> PyResult<String> {
+    let input: CriticalityInput = serde_json::from_str(&json_payload)
+        .map_err(|err| PyValueError::new_err(format!("Invalid criticality payload: {}", err)))?;
+
+    let assessment = evaluate_criticality_inner(&input)
+        .map_err(|err| PyValueError::new_err(format!("Criticality evaluation failed: {}", err)))?;
+
+    serde_json::to_string(&assessment).map_err(|err| {
+        PyValueError::new_err(format!(
+            "Failed to serialize criticality assessment: {}",
+            err
+        ))
+    })
+}
+
+#[pyfunction]
 fn evaluate_subjective_risk(json_payload: String) -> PyResult<String> {
     let input: SubjectiveRiskInput = serde_json::from_str(&json_payload).map_err(|err| {
         PyValueError::new_err(format!("Invalid subjective risk payload: {}", err))
@@ -215,6 +232,7 @@ fn rygnal_kernel(_py: Python, module: &PyModule) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(evaluate_patch_risk, module)?)?;
     module.add_function(wrap_pyfunction!(analyze_code_structure, module)?)?;
     module.add_function(wrap_pyfunction!(evaluate_agent_action, module)?)?;
+    module.add_function(wrap_pyfunction!(evaluate_criticality, module)?)?;
     module.add_function(wrap_pyfunction!(evaluate_subjective_risk, module)?)?;
     Ok(())
 }

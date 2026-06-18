@@ -249,3 +249,85 @@ def test_rust_kernel_subjective_risk_rejects_invalid_numeric_context() -> None:
 
     with pytest.raises(ValueError, match="line_ownership_ratio"):
         rygnal_kernel.evaluate_subjective_risk(json.dumps(payload))
+
+
+def test_rust_kernel_evaluates_criticality_bridge() -> None:
+    rygnal_kernel = pytest.importorskip("rygnal_kernel")
+
+    payload = {
+        "file_path": "src/service.py",
+        "action_type": "modified",
+        "old_code": (
+            "def important_business_rule():\n"
+            "    account_limit = 100\n"
+            "    return account_limit\n"
+        ),
+        "new_code": "def replacement():\n    return 1\n",
+    }
+
+    result = json.loads(rygnal_kernel.evaluate_criticality(json.dumps(payload)))
+
+    assert result["risk_level"] == "high"
+    assert result["path_category"] == "normal"
+    assert result["path_severity"] == "medium"
+    assert result["criticality_index"] >= 5.0
+    assert result["semantic_metrics"]["survival_ratio"] < 0.25
+    assert any("Semantic destruction" in reason for reason in result["reasons"])
+
+
+def test_rust_kernel_criticality_added_file_avoids_false_destruction() -> None:
+    rygnal_kernel = pytest.importorskip("rygnal_kernel")
+
+    payload = {
+        "file_path": "src/utils.py",
+        "action_type": "added",
+        "old_code": "",
+        "new_code": "def helper():\n    return True\n",
+    }
+
+    result = json.loads(rygnal_kernel.evaluate_criticality(json.dumps(payload)))
+
+    assert result["risk_level"] == "medium"
+    assert result["semantic_metrics"]["survival_ratio"] == 1.0
+    assert any("Added files are not penalized" in reason for reason in result["reasons"])
+    assert not any("Semantic destruction" in reason for reason in result["reasons"])
+
+
+def test_rust_kernel_criticality_secret_path_is_critical() -> None:
+    rygnal_kernel = pytest.importorskip("rygnal_kernel")
+
+    payload = {
+        "file_path": ".env",
+        "action_type": "modified",
+        "old_code": "TOKEN=old\n",
+        "new_code": "TOKEN=new\n",
+    }
+
+    result = json.loads(rygnal_kernel.evaluate_criticality(json.dumps(payload)))
+
+    assert result["risk_level"] == "critical"
+    assert result["path_category"] == "secret"
+    assert result["path_severity"] == "critical"
+
+
+def test_rust_kernel_criticality_rejects_invalid_payload() -> None:
+    rygnal_kernel = pytest.importorskip("rygnal_kernel")
+
+    bad_payload = '{"file_path": "src/main.py"}'
+
+    with pytest.raises(ValueError, match="Invalid criticality payload"):
+        rygnal_kernel.evaluate_criticality(bad_payload)
+
+
+def test_rust_kernel_criticality_rejects_unsafe_path() -> None:
+    rygnal_kernel = pytest.importorskip("rygnal_kernel")
+
+    payload = {
+        "file_path": "../evil.py",
+        "action_type": "modified",
+        "old_code": "def old(): pass\n",
+        "new_code": "def new(): pass\n",
+    }
+
+    with pytest.raises(ValueError, match="Criticality evaluation failed"):
+        rygnal_kernel.evaluate_criticality(json.dumps(payload))

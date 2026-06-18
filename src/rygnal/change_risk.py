@@ -51,6 +51,7 @@ MAX_CRITICALITY_SHADOW_BYTES = 1_000_000
 
 GIT_SUBMODULE_MODE = "160000"
 GIT_SYMLINK_MODE = "120000"
+GIT_LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1"
 
 
 DOC_EXTENSIONS = {
@@ -293,6 +294,14 @@ DESTRUCTIVE_ADDED_LINE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 
 class ChangeRiskClassificationError(RuntimeError):
     """Raised when guarded change risk classification cannot complete safely."""
+
+
+class _CriticalityInvalidEncodingError(ChangeRiskClassificationError):
+    """Raised when file content cannot be decoded as strict UTF-8."""
+
+
+class _CriticalityGitLfsPointerError(ChangeRiskClassificationError):
+    """Raised when file content is a Git LFS pointer instead of real source."""
 
 
 @dataclass(frozen=True)
@@ -576,6 +585,16 @@ def _criticality_shadow_for_file(
 
     try:
         old_code, new_code = _load_criticality_file_contents(patch_diff, file_diff)
+    except _CriticalityInvalidEncodingError:
+        return _criticality_failure_shadow(
+            error_code="invalid-encoding",
+            error_reason="file contents are not valid UTF-8 for Rust criticality analysis",
+        )
+    except _CriticalityGitLfsPointerError:
+        return _criticality_failure_shadow(
+            error_code="git-lfs-pointer",
+            error_reason="Git LFS pointer files are excluded from Rust criticality analysis",
+        )
     except Exception as exc:
         return _criticality_failure_shadow(
             error_code="content-unavailable",
@@ -678,14 +697,22 @@ def _read_baseline_file_text(
         cwd=workspace,
         check=True,
         capture_output=True,
-        text=True,
-        encoding="utf-8",
     )
-    return result.stdout
+    return _decode_criticality_file_bytes(result.stdout)
 
 
 def _read_workspace_file_text(workspace: Path, path: str) -> str:
-    return (workspace / path).read_text(encoding="utf-8")
+    return _decode_criticality_file_bytes((workspace / path).read_bytes())
+
+
+def _decode_criticality_file_bytes(raw_content: bytes) -> str:
+    if raw_content.startswith(GIT_LFS_POINTER_PREFIX):
+        raise _CriticalityGitLfsPointerError
+
+    try:
+        return raw_content.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise _CriticalityInvalidEncodingError from exc
 
 
 def _shadow_text_size_bytes(*values: str) -> int:
@@ -1075,6 +1102,7 @@ __all__ = [
     "ChangeRiskReason",
     "ChangeRiskReport",
     "FileRiskClassification",
+    "GIT_LFS_POINTER_PREFIX",
     "GIT_SUBMODULE_MODE",
     "GIT_SYMLINK_MODE",
     "MAX_CRITICALITY_SHADOW_BYTES",

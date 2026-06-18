@@ -935,3 +935,70 @@ def test_rust_criticality_shadow_bypasses_git_submodules(
         shadow["error_reason"]
         == "Git submodule entries are excluded from Rust criticality analysis"
     )
+
+
+def test_rust_criticality_shadow_bypasses_invalid_utf8_content(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls = 0
+
+    def fake_evaluate(criticality_input):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("Rust criticality should not be called for invalid UTF-8")
+
+    monkeypatch.setattr("rygnal.change_risk.evaluate_criticality", fake_evaluate)
+
+    repo = create_repo(tmp_path)
+    invalid_file = repo / "src"
+    invalid_file.mkdir()
+    (invalid_file / "bad.py").write_bytes(b"print('ok')\n\xff\n")
+
+    report = classify_repo_changes(repo)
+
+    file_risk = risk_for_path(report, "src/bad.py")
+    shadow = file_risk.audit_summary["rust_criticality"]
+
+    assert calls == 0
+    assert file_risk.risk_level == RiskLevel.MEDIUM
+    assert shadow["available"] is False
+    assert shadow["error_code"] == "invalid-encoding"
+    assert shadow["error_reason"] == (
+        "file contents are not valid UTF-8 for Rust criticality analysis"
+    )
+
+
+def test_rust_criticality_shadow_bypasses_git_lfs_pointer_files(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls = 0
+
+    def fake_evaluate(criticality_input):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("Rust criticality should not be called for Git LFS pointers")
+
+    monkeypatch.setattr("rygnal.change_risk.evaluate_criticality", fake_evaluate)
+
+    repo = create_repo(tmp_path)
+    lfs_file = repo / "model.bin"
+    lfs_file.write_text(
+        "version https://git-lfs.github.com/spec/v1\n"
+        "oid sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n"
+        "size 123456\n",
+        encoding="utf-8",
+    )
+
+    report = classify_repo_changes(repo)
+
+    file_risk = risk_for_path(report, "model.bin")
+    shadow = file_risk.audit_summary["rust_criticality"]
+
+    assert calls == 0
+    assert shadow["available"] is False
+    assert shadow["error_code"] == "git-lfs-pointer"
+    assert shadow["error_reason"] == (
+        "Git LFS pointer files are excluded from Rust criticality analysis"
+    )

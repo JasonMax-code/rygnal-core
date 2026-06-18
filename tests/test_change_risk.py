@@ -850,3 +850,88 @@ def test_rust_criticality_ghost_critical_with_low_index_does_not_raise_python_ri
     assert report.overall_risk_level == RiskLevel.LOW
     assert file_risk.audit_summary["rust_criticality"]["risk_level"] == "critical"
     assert not any(reason.code == "rust-criticality-signal" for reason in file_risk.reasons)
+
+
+def test_rust_criticality_shadow_bypasses_symlink_files(
+    monkeypatch,
+) -> None:
+    calls = 0
+
+    def fake_evaluate(criticality_input):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("Rust criticality should not be called for symlinks")
+
+    monkeypatch.setattr("rygnal.change_risk.evaluate_criticality", fake_evaluate)
+
+    patch_file = PatchFileDiff(
+        path="escape-link",
+        kind=ChangedFileKind.UNTRACKED,
+        additions=1,
+        deletions=0,
+        binary=False,
+        new_mode="120000",
+    )
+    patch = PatchDiff(
+        workspace_path="/tmp/workspace-that-does-not-exist",
+        baseline_commit_sha="a" * 40,
+        patch="diff --git a/escape-link b/escape-link\n",
+        patch_sha256="b" * 64,
+        patch_size_bytes=42,
+        files=(patch_file,),
+    )
+
+    report = classify_patch_risk(patch)
+
+    file_risk = risk_for_path(report, "escape-link")
+    shadow = file_risk.audit_summary["rust_criticality"]
+
+    assert calls == 0
+    assert file_risk.risk_level == RiskLevel.CRITICAL
+    assert shadow["available"] is False
+    assert shadow["error_code"] == "symlink-file"
+    assert shadow["error_reason"] == "Symlink entries are excluded from Rust criticality analysis"
+
+
+def test_rust_criticality_shadow_bypasses_git_submodules(
+    monkeypatch,
+) -> None:
+    calls = 0
+
+    def fake_evaluate(criticality_input):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("Rust criticality should not be called for git submodules")
+
+    monkeypatch.setattr("rygnal.change_risk.evaluate_criticality", fake_evaluate)
+
+    patch_file = PatchFileDiff(
+        path="vendor/library",
+        kind=ChangedFileKind.MODIFIED,
+        additions=None,
+        deletions=None,
+        binary=False,
+        old_mode="160000",
+        new_mode="160000",
+    )
+    patch = PatchDiff(
+        workspace_path="/tmp/workspace-that-does-not-exist",
+        baseline_commit_sha="a" * 40,
+        patch="diff --git a/vendor/library b/vendor/library\n",
+        patch_sha256="b" * 64,
+        patch_size_bytes=42,
+        files=(patch_file,),
+    )
+
+    report = classify_patch_risk(patch)
+
+    file_risk = risk_for_path(report, "vendor/library")
+    shadow = file_risk.audit_summary["rust_criticality"]
+
+    assert calls == 0
+    assert shadow["available"] is False
+    assert shadow["error_code"] == "git-submodule"
+    assert (
+        shadow["error_reason"]
+        == "Git submodule entries are excluded from Rust criticality analysis"
+    )

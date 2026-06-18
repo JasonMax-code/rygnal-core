@@ -49,6 +49,9 @@ RUST_CRITICALITY_ENFORCED_LEVELS: dict[str, RiskLevel] = {
 MIN_ENFORCED_CRITICALITY_INDEX = 5.0
 MAX_CRITICALITY_SHADOW_BYTES = 1_000_000
 
+GIT_SUBMODULE_MODE = "160000"
+GIT_SYMLINK_MODE = "120000"
+
 
 DOC_EXTENSIONS = {
     ".adoc",
@@ -553,6 +556,18 @@ def _criticality_shadow_for_file(
     patch_diff: PatchDiff,
     file_diff: PatchFileDiff,
 ) -> RustCriticalityShadow:
+    if _is_symlink_file(file_diff):
+        return _criticality_failure_shadow(
+            error_code="symlink-file",
+            error_reason="Symlink entries are excluded from Rust criticality analysis",
+        )
+
+    if _is_git_submodule(file_diff):
+        return _criticality_failure_shadow(
+            error_code="git-submodule",
+            error_reason="Git submodule entries are excluded from Rust criticality analysis",
+        )
+
     if file_diff.binary:
         return _criticality_failure_shadow(
             error_code="binary-file",
@@ -588,6 +603,14 @@ def _criticality_shadow_for_file(
         return _criticality_exception_shadow(exc)
 
     return _criticality_success_shadow(assessment)
+
+
+def _is_symlink_file(file_diff: PatchFileDiff) -> bool:
+    return file_diff.old_mode == GIT_SYMLINK_MODE or file_diff.new_mode == GIT_SYMLINK_MODE
+
+
+def _is_git_submodule(file_diff: PatchFileDiff) -> bool:
+    return file_diff.old_mode == GIT_SUBMODULE_MODE or file_diff.new_mode == GIT_SUBMODULE_MODE
 
 
 def _load_criticality_file_contents(
@@ -1052,6 +1075,8 @@ __all__ = [
     "ChangeRiskReason",
     "ChangeRiskReport",
     "FileRiskClassification",
+    "GIT_SUBMODULE_MODE",
+    "GIT_SYMLINK_MODE",
     "MAX_CRITICALITY_SHADOW_BYTES",
     "MIN_ENFORCED_CRITICALITY_INDEX",
     "RISK_LEVEL_ORDER",

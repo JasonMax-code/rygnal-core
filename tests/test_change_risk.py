@@ -1002,3 +1002,94 @@ def test_rust_criticality_shadow_bypasses_git_lfs_pointer_files(
     assert shadow["error_reason"] == (
         "Git LFS pointer files are excluded from Rust criticality analysis"
     )
+
+
+def test_rust_criticality_shadow_bypasses_jupyter_notebooks(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls = 0
+
+    def fake_evaluate(criticality_input):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("Rust criticality should not be called for notebooks")
+
+    monkeypatch.setattr("rygnal.change_risk.evaluate_criticality", fake_evaluate)
+
+    repo = create_repo(tmp_path)
+    (repo / "analysis.ipynb").write_text(
+        '{"cells":[{"cell_type":"code","source":["print(1)\\n"]}]}',
+        encoding="utf-8",
+    )
+
+    report = classify_repo_changes(repo)
+
+    file_risk = risk_for_path(report, "analysis.ipynb")
+    shadow = file_risk.audit_summary["rust_criticality"]
+
+    assert calls == 0
+    assert shadow["available"] is False
+    assert shadow["error_code"] == "jupyter-notebook-unsupported"
+    assert shadow["error_reason"] == (
+        "Jupyter notebook files are excluded from Rust criticality analysis"
+    )
+
+
+def test_rust_criticality_shadow_bypasses_lockfiles(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls = 0
+
+    def fake_evaluate(criticality_input):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("Rust criticality should not be called for lockfiles")
+
+    monkeypatch.setattr("rygnal.change_risk.evaluate_criticality", fake_evaluate)
+
+    repo = create_repo(tmp_path)
+    (repo / "package-lock.json").write_text('{"lockfileVersion": 3}\\n', encoding="utf-8")
+
+    report = classify_repo_changes(repo)
+
+    file_risk = risk_for_path(report, "package-lock.json")
+    shadow = file_risk.audit_summary["rust_criticality"]
+
+    assert calls == 0
+    assert shadow["available"] is False
+    assert shadow["error_code"] == "lockfile"
+    assert shadow["error_reason"] == "Lockfiles are excluded from Rust criticality analysis"
+
+
+def test_rust_criticality_shadow_bypasses_generated_files(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls = 0
+
+    def fake_evaluate(criticality_input):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("Rust criticality should not be called for generated files")
+
+    monkeypatch.setattr("rygnal.change_risk.evaluate_criticality", fake_evaluate)
+
+    repo = create_repo(tmp_path)
+    src = repo / "src"
+    src.mkdir()
+    (src / "generated.py").write_text(
+        "# This file is auto-generated. DO NOT EDIT.\\ndef generated_value():\\n    return 1\\n",
+        encoding="utf-8",
+    )
+
+    report = classify_repo_changes(repo)
+
+    file_risk = risk_for_path(report, "src/generated.py")
+    shadow = file_risk.audit_summary["rust_criticality"]
+
+    assert calls == 0
+    assert shadow["available"] is False
+    assert shadow["error_code"] == "generated-file"
+    assert shadow["error_reason"] == "Generated files are excluded from Rust criticality analysis"

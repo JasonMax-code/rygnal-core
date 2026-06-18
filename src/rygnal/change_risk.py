@@ -43,7 +43,9 @@ RISK_LEVEL_ORDER: dict[RiskLevel, int] = {
 
 RUST_CRITICALITY_ENFORCED_LEVELS: dict[str, RiskLevel] = {
     "high": RiskLevel.HIGH,
-    "critical": RiskLevel.CRITICAL,
+    # Rust criticality is an approval signal in the Python guarded runner.
+    # It must not independently create a BLOCKED guarded-run status.
+    "critical": RiskLevel.HIGH,
 }
 
 MIN_ENFORCED_CRITICALITY_INDEX = 5.0

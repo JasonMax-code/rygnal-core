@@ -222,7 +222,7 @@ fn semantic_modifier(action_type: FileActionType, survival_ratio: f64, old_code:
         0.0
     };
 
-    if old_line_count < 5 {
+    if old_line_count <= 1 {
         modifier.min(1.0)
     } else {
         modifier

@@ -10,10 +10,19 @@ from __future__ import annotations
 
 import importlib
 import json
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import asdict, dataclass
+from typing import Any, Literal
 
 from rygnal.changed_files import normalize_repo_relative_path
+
+CriticalityActionType = Literal[
+    "added",
+    "modified",
+    "deleted",
+    "renamed",
+    "mode_changed",
+    "untracked",
+]
 
 
 class RustKernelUnavailableError(RuntimeError):
@@ -22,6 +31,15 @@ class RustKernelUnavailableError(RuntimeError):
 
 class RustKernelError(RuntimeError):
     """Raised when the Rust kernel returns invalid or unusable output."""
+
+
+class RustCriticalityEvaluationError(RustKernelError):
+    """Raised when Rust rejects criticality evaluation with a structured code."""
+
+    def __init__(self, *, error_code: str, reason: str) -> None:
+        self.error_code = error_code
+        self.reason = reason
+        super().__init__(f"rust criticality evaluation failed [{error_code}]: {reason}")
 
 
 @dataclass(frozen=True)
@@ -67,6 +85,24 @@ class RustSemanticMetrics:
 
 
 @dataclass(frozen=True)
+class RustCriticalityInput:
+    file_path: str
+    action_type: CriticalityActionType
+    old_code: str = ""
+    new_code: str = ""
+
+
+@dataclass(frozen=True)
+class RustCriticalityAssessment:
+    criticality_index: float
+    risk_level: str
+    reasons: tuple[str, ...]
+    semantic_metrics: RustSemanticMetrics
+    path_category: str
+    path_severity: str
+
+
+@dataclass(frozen=True)
 class RustSubjectiveRiskAssessment:
     total_criticality: float
     judgment: str
@@ -79,7 +115,7 @@ class RustSubjectiveRiskAssessment:
 def is_rust_kernel_available() -> bool:
     try:
         importlib.import_module("rygnal_kernel")
-    except ModuleNotFoundError:
+    except ImportError:
         return False
     return True
 
@@ -87,8 +123,10 @@ def is_rust_kernel_available() -> bool:
 def _load_kernel() -> Any:
     try:
         return importlib.import_module("rygnal_kernel")
-    except ModuleNotFoundError as exc:
-        raise RustKernelUnavailableError("optional Rust kernel extension is not installed") from exc
+    except ImportError as exc:
+        raise RustKernelUnavailableError(
+            "optional Rust kernel extension is not installed or failed to load"
+        ) from exc
 
 
 def evaluate_agent_action(action: RustAgentAction) -> RustRiskAssessment:
@@ -112,6 +150,19 @@ def evaluate_agent_action(action: RustAgentAction) -> RustRiskAssessment:
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise RustKernelError("rust kernel returned invalid assessment shape") from exc
+
+
+def evaluate_criticality(
+    criticality_input: RustCriticalityInput,
+) -> RustCriticalityAssessment:
+    payload = asdict(criticality_input)
+    action_type = payload["action_type"]
+
+    if hasattr(action_type, "value"):
+        payload["action_type"] = action_type.value
+
+    result = _call_criticality_kernel(payload)
+    return _parse_criticality_assessment(result)
 
 
 def evaluate_subjective_risk(
@@ -158,6 +209,173 @@ def evaluate_subjective_risk(
         raise RustKernelError("rust kernel returned invalid subjective risk shape") from exc
 
 
+def _parse_criticality_assessment(result: dict[str, Any]) -> RustCriticalityAssessment:
+    criticality_index = _require_number(
+        result,
+        "criticality_index",
+        "rust kernel returned invalid or missing criticality_index",
+    )
+    risk_level = _require_string(
+        result,
+        "risk_level",
+        "rust kernel returned invalid or missing risk_level",
+    )
+    reasons = _require_string_tuple(
+        result,
+        "reasons",
+        "rust kernel returned invalid or missing reasons",
+    )
+    semantic_metrics = _require_dict(
+        result,
+        "semantic_metrics",
+        "rust kernel returned invalid or missing semantic_metrics",
+    )
+    path_category = _require_string(
+        result,
+        "path_category",
+        "rust kernel returned invalid or missing path_category",
+    )
+    path_severity = _require_string(
+        result,
+        "path_severity",
+        "rust kernel returned invalid or missing path_severity",
+    )
+
+    return RustCriticalityAssessment(
+        criticality_index=criticality_index,
+        risk_level=risk_level,
+        reasons=reasons,
+        semantic_metrics=RustSemanticMetrics(
+            old_node_count=_require_int(
+                semantic_metrics,
+                "old_node_count",
+                "rust kernel returned invalid or missing semantic_metrics.old_node_count",
+            ),
+            new_node_count=_require_int(
+                semantic_metrics,
+                "new_node_count",
+                "rust kernel returned invalid or missing semantic_metrics.new_node_count",
+            ),
+            old_token_count=_require_int(
+                semantic_metrics,
+                "old_token_count",
+                "rust kernel returned invalid or missing semantic_metrics.old_token_count",
+            ),
+            new_token_count=_require_int(
+                semantic_metrics,
+                "new_token_count",
+                "rust kernel returned invalid or missing semantic_metrics.new_token_count",
+            ),
+            matched_node_count=_require_int(
+                semantic_metrics,
+                "matched_node_count",
+                "rust kernel returned invalid or missing semantic_metrics.matched_node_count",
+            ),
+            survival_ratio=_require_number(
+                semantic_metrics,
+                "survival_ratio",
+                "rust kernel returned invalid or missing semantic_metrics.survival_ratio",
+            ),
+        ),
+        path_category=path_category,
+        path_severity=path_severity,
+    )
+
+
+def _call_criticality_kernel(payload: dict[str, Any]) -> dict[str, Any]:
+    kernel = _load_kernel()
+
+    try:
+        function = kernel.evaluate_criticality
+    except AttributeError as exc:
+        raise RustKernelError("rust kernel does not expose evaluate_criticality") from exc
+
+    try:
+        raw_result = function(json.dumps(payload))
+    except (UnicodeEncodeError, TypeError) as exc:
+        raise RustKernelError(f"native criticality boundary failed: {exc}") from exc
+    except ValueError as exc:
+        raise RustKernelError(f"rust kernel rejected criticality input: {exc}") from exc
+    except Exception as exc:
+        error_type = getattr(kernel, "CriticalityEvaluationError", None)
+        if error_type is not None and isinstance(exc, error_type):
+            raise _criticality_error_from_native_exception(exc) from exc
+        raise
+
+    try:
+        result = json.loads(raw_result)
+    except json.JSONDecodeError as exc:
+        raise RustKernelError("rust kernel returned invalid JSON") from exc
+
+    if not isinstance(result, dict):
+        raise RustKernelError("rust kernel returned non-object JSON")
+
+    return result
+
+
+def _criticality_error_from_native_exception(
+    exc: Exception,
+) -> RustCriticalityEvaluationError:
+    try:
+        payload = json.loads(str(exc))
+    except json.JSONDecodeError as parse_exc:
+        raise RustKernelError("rust kernel returned invalid criticality error JSON") from parse_exc
+
+    if not isinstance(payload, dict):
+        raise RustKernelError("rust kernel returned non-object criticality error JSON")
+
+    error_code = payload.get("error_code")
+    reason = payload.get("reason")
+
+    if not isinstance(error_code, str) or not isinstance(reason, str):
+        raise RustKernelError("rust kernel returned invalid criticality error shape")
+
+    return RustCriticalityEvaluationError(error_code=error_code, reason=reason)
+
+
+def _require_dict(
+    source: dict[str, Any],
+    key: str,
+    error_message: str,
+) -> dict[str, Any]:
+    value = source.get(key)
+    if not isinstance(value, dict):
+        raise RustKernelError(error_message)
+    return value
+
+
+def _require_string(source: dict[str, Any], key: str, error_message: str) -> str:
+    value = source.get(key)
+    if not isinstance(value, str):
+        raise RustKernelError(error_message)
+    return value
+
+
+def _require_string_tuple(
+    source: dict[str, Any],
+    key: str,
+    error_message: str,
+) -> tuple[str, ...]:
+    value = source.get(key)
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise RustKernelError(error_message)
+    return tuple(value)
+
+
+def _require_int(source: dict[str, Any], key: str, error_message: str) -> int:
+    value = source.get(key)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise RustKernelError(error_message)
+    return value
+
+
+def _require_number(source: dict[str, Any], key: str, error_message: str) -> float:
+    value = source.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise RustKernelError(error_message)
+    return float(value)
+
+
 def _call_json_kernel_function(
     *,
     function_name: str,
@@ -191,12 +409,17 @@ __all__ = [
     "RustAgentAction",
     "RustHumanContext",
     "RustKernelError",
+    "RustCriticalityInput",
+    "RustCriticalityEvaluationError",
+    "RustCriticalityAssessment",
+    "CriticalityActionType",
     "RustKernelUnavailableError",
     "RustRiskAssessment",
     "RustSemanticMetrics",
     "RustSubjectiveRiskAssessment",
     "RustSubjectiveRiskInput",
     "evaluate_agent_action",
+    "evaluate_criticality",
     "evaluate_subjective_risk",
     "is_rust_kernel_available",
 ]

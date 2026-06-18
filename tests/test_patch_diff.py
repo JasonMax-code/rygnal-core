@@ -193,3 +193,39 @@ def test_invalid_baseline_sha_fails_closed(tmp_path: Path) -> None:
 
     with pytest.raises(PatchDiffGenerationError):
         generate_patch_diff(repo, "HEAD")
+
+
+def test_preserves_heavily_rewritten_rename_with_lower_similarity_threshold(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    run_git(repo, "init")
+    run_git(repo, "config", "user.email", "test@example.com")
+    run_git(repo, "config", "user.name", "Test User")
+    run_git(repo, "config", "core.filemode", "true")
+
+    old_lines = [f"stable line {index}\n" for index in range(100)]
+    (repo / "legacy_module.py").write_text("".join(old_lines), encoding="utf-8")
+
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "baseline")
+    baseline = run_git(repo, "rev-parse", "HEAD")
+
+    run_git(repo, "mv", "legacy_module.py", "modern_module.py")
+
+    rewritten_lines = [
+        *(f"stable line {index}\n" for index in range(30)),
+        *(f"new behavior {index}\n" for index in range(70)),
+    ]
+    (repo / "modern_module.py").write_text("".join(rewritten_lines), encoding="utf-8")
+
+    patch = generate_patch_diff(repo, baseline)
+
+    renamed = file_by_path(patch, "modern_module.py")
+
+    assert renamed.kind == ChangedFileKind.RENAMED
+    assert renamed.old_path == "legacy_module.py"
+    assert "rename from legacy_module.py" in patch.patch
+    assert "rename to modern_module.py" in patch.patch

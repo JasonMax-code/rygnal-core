@@ -1,4 +1,5 @@
 mod ast;
+mod criticality;
 mod models;
 mod path_safety;
 mod subjective;

@@ -1093,3 +1093,107 @@ def test_rust_criticality_shadow_bypasses_generated_files(
     assert shadow["available"] is False
     assert shadow["error_code"] == "generated-file"
     assert shadow["error_reason"] == "Generated files are excluded from Rust criticality analysis"
+
+
+def test_rust_criticality_shadow_allows_whitespace_padded_file_under_raw_limit(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from rygnal.rust_kernel import RustCriticalityAssessment, RustSemanticMetrics
+
+    captured = {}
+
+    def fake_evaluate(criticality_input):
+        captured["input"] = criticality_input
+        return RustCriticalityAssessment(
+            criticality_index=1.0,
+            risk_level="low",
+            reasons=("padded but valid",),
+            semantic_metrics=RustSemanticMetrics(
+                old_node_count=0,
+                new_node_count=1,
+                old_token_count=0,
+                new_token_count=1,
+                matched_node_count=0,
+                survival_ratio=1.0,
+            ),
+            path_category="source",
+            path_severity="low",
+        )
+
+    monkeypatch.setattr("rygnal.change_risk.evaluate_criticality", fake_evaluate)
+
+    repo = create_repo(tmp_path)
+    src = repo / "src"
+    src.mkdir()
+    padding = "\n" * 600_000
+    (src / "padded.py").write_text(f"{padding}print('safe')\\n", encoding="utf-8")
+
+    report = classify_repo_changes(repo)
+
+    file_risk = risk_for_path(report, "src/padded.py")
+    shadow = file_risk.audit_summary["rust_criticality"]
+
+    assert shadow["available"] is True
+    assert shadow["risk_level"] == "low"
+    assert captured["input"].new_code.endswith("print('safe')\\n")
+
+
+def test_rust_criticality_shadow_rejects_raw_content_above_hard_limit(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls = 0
+
+    def fake_evaluate(criticality_input):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("Rust criticality should not be called above raw hard limit")
+
+    monkeypatch.setattr("rygnal.change_risk.evaluate_criticality", fake_evaluate)
+
+    repo = create_repo(tmp_path)
+    src = repo / "src"
+    src.mkdir()
+    padding = "\\n" * 2_000_001
+    (src / "too_large_raw.py").write_text(f"{padding}print('safe')\\n", encoding="utf-8")
+
+    report = classify_repo_changes(repo)
+
+    file_risk = risk_for_path(report, "src/too_large_raw.py")
+    shadow = file_risk.audit_summary["rust_criticality"]
+
+    assert calls == 0
+    assert shadow["available"] is False
+    assert shadow["error_code"] == "file-too-large"
+    assert shadow["error_reason"] == "file size exceeds shadow mode criticality limits"
+
+
+def test_rust_criticality_shadow_rejects_stripped_content_above_analysis_limit(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls = 0
+
+    def fake_evaluate(criticality_input):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("Rust criticality should not be called above analysis limit")
+
+    monkeypatch.setattr("rygnal.change_risk.evaluate_criticality", fake_evaluate)
+
+    repo = create_repo(tmp_path)
+    src = repo / "src"
+    src.mkdir()
+    large_code = "x" * 1_000_001
+    (src / "too_large_code.py").write_text(large_code, encoding="utf-8")
+
+    report = classify_repo_changes(repo)
+
+    file_risk = risk_for_path(report, "src/too_large_code.py")
+    shadow = file_risk.audit_summary["rust_criticality"]
+
+    assert calls == 0
+    assert shadow["available"] is False
+    assert shadow["error_code"] == "file-too-large"
+    assert shadow["error_reason"] == "file size exceeds shadow mode criticality limits"

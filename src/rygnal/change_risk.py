@@ -48,6 +48,7 @@ RUST_CRITICALITY_ENFORCED_LEVELS: dict[str, RiskLevel] = {
 
 MIN_ENFORCED_CRITICALITY_INDEX = 5.0
 MAX_CRITICALITY_SHADOW_BYTES = 1_000_000
+MAX_CRITICALITY_RAW_BYTES = MAX_CRITICALITY_SHADOW_BYTES * 2
 
 GIT_SUBMODULE_MODE = "160000"
 GIT_SYMLINK_MODE = "120000"
@@ -646,7 +647,13 @@ def _criticality_shadow_for_file(
             error_reason="Generated files are excluded from Rust criticality analysis",
         )
 
-    if _shadow_text_size_bytes(old_code, new_code) > MAX_CRITICALITY_SHADOW_BYTES:
+    if (
+        _shadow_text_size_bytes(
+            old_code.strip(),
+            new_code.strip(),
+        )
+        > MAX_CRITICALITY_SHADOW_BYTES
+    ):
         return _criticality_failure_shadow(
             error_code="file-too-large",
             error_reason="file size exceeds shadow mode criticality limits",
@@ -713,7 +720,7 @@ def _load_criticality_file_contents(
     if file_diff.kind is not ChangedFileKind.DELETED:
         new_size = _workspace_file_size(workspace, new_path)
 
-    if old_size + new_size > MAX_CRITICALITY_SHADOW_BYTES:
+    if old_size + new_size > MAX_CRITICALITY_RAW_BYTES:
         return "x" * (MAX_CRITICALITY_SHADOW_BYTES + 1), ""
 
     old_code = ""
@@ -1168,6 +1175,7 @@ __all__ = [
     "GIT_LFS_POINTER_PREFIX",
     "GIT_SUBMODULE_MODE",
     "GIT_SYMLINK_MODE",
+    "MAX_CRITICALITY_RAW_BYTES",
     "MAX_CRITICALITY_SHADOW_BYTES",
     "MIN_ENFORCED_CRITICALITY_INDEX",
     "RISK_LEVEL_ORDER",

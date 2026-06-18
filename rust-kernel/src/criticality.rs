@@ -98,8 +98,13 @@ fn semantic_metrics_for_input(
     }
 
     if is_python_path(normalized_path) {
-        return analyze_python_survival(&input.old_code, &input.new_code)
-            .map_err(CriticalityError::from);
+        return match analyze_python_survival(&input.old_code, &input.new_code) {
+            Ok(metrics) => Ok(metrics),
+            Err(AstError::ParseFailed) => {
+                Ok(text_survival_metrics(&input.old_code, &input.new_code))
+            }
+            Err(err) => Err(CriticalityError::from(err)),
+        };
     }
 
     Ok(text_survival_metrics(&input.old_code, &input.new_code))
@@ -601,5 +606,23 @@ mod tests {
         assert_eq!(assessment.semantic_metrics.survival_ratio, 0.0);
         assert_eq!(assessment.risk_level, CriticalityRiskLevel::Critical);
         assert!(assessment.criticality_index >= 7.5);
+    }
+
+    #[test]
+    fn invalid_python_syntax_falls_back_to_text_survival() {
+        let input = CriticalityInput {
+            file_path: "src/broken.py".to_string(),
+            action_type: FileActionType::Modified,
+            old_code: "def broken(:\n    value = 1\n".to_string(),
+            new_code: "def broken(:\n    value = 1\n".to_string(),
+        };
+
+        let assessment = evaluate_criticality(&input).expect("parse errors should fall back");
+
+        assert_eq!(assessment.semantic_metrics.old_node_count, 0);
+        assert_eq!(assessment.semantic_metrics.new_node_count, 0);
+        assert_eq!(assessment.semantic_metrics.matched_node_count, 2);
+        assert_eq!(assessment.semantic_metrics.survival_ratio, 1.0);
+        assert_eq!(assessment.risk_level, CriticalityRiskLevel::Medium);
     }
 }

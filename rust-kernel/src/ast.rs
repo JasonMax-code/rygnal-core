@@ -96,6 +96,10 @@ fn extract_python_features(code: &str) -> Result<SyntaxFeatures, AstError> {
     let tree = parser.parse(code, None).ok_or(AstError::ParseFailed)?;
     let root = tree.root_node();
 
+    if root.has_error() {
+        return Err(AstError::ParseFailed);
+    }
+
     let mut features = SyntaxFeatures {
         named_node_count: count_named_nodes(root)?,
         semantic_tokens: BTreeMap::new(),

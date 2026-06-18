@@ -257,3 +257,441 @@ def test_common_credential_paths_are_critical(tmp_path: Path) -> None:
             reason.code == "security-sensitive-path"
             for reason in risks_by_path[sensitive_path].reasons
         )
+
+
+def test_rust_criticality_shadow_success_is_attached_without_changing_risk(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from rygnal.rust_kernel import RustCriticalityAssessment, RustSemanticMetrics
+
+    repo = create_repo(tmp_path)
+    src = repo / "src"
+    src.mkdir()
+    (src / "app.py").write_text("print('hello')\n", encoding="utf-8")
+
+    def fake_evaluate(criticality_input):
+        assert criticality_input.file_path == "src/app.py"
+        assert criticality_input.action_type == "untracked"
+        assert criticality_input.old_code == ""
+        assert criticality_input.new_code == "print('hello')\n"
+        return RustCriticalityAssessment(
+            criticality_index=9.0,
+            risk_level="critical",
+            reasons=("shadow-only criticality",),
+            semantic_metrics=RustSemanticMetrics(
+                old_node_count=0,
+                new_node_count=1,
+                old_token_count=0,
+                new_token_count=3,
+                matched_node_count=0,
+                survival_ratio=1.0,
+            ),
+            path_category="source",
+            path_severity="medium",
+        )
+
+    monkeypatch.setattr("rygnal.change_risk.evaluate_criticality", fake_evaluate)
+
+    report = classify_repo_changes(repo)
+
+    file_risk = risk_for_path(report, "src/app.py")
+    assert file_risk.risk_level == RiskLevel.MEDIUM
+    assert report.overall_risk_level == RiskLevel.MEDIUM
+
+    shadow = file_risk.audit_summary["rust_criticality"]
+    assert shadow["available"] is True
+    assert shadow["criticality_index"] == 9.0
+    assert shadow["risk_level"] == "critical"
+    assert shadow["reasons"] == ("shadow-only criticality",)
+
+    assert file_risk.risk_level == RiskLevel.MEDIUM
+    assert report.overall_risk_level == RiskLevel.MEDIUM
+    assert report.risk_counts["medium"] == 1
+
+
+def test_rust_criticality_shadow_high_result_does_not_mutate_python_risk(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from rygnal.rust_kernel import RustCriticalityAssessment, RustSemanticMetrics
+
+    repo = create_repo(tmp_path)
+    docs = repo / "docs"
+    docs.mkdir()
+    (docs / "usage.md").write_text("Usage\n", encoding="utf-8")
+
+    python_only_report = classify_repo_changes(repo)
+
+    def fake_evaluate(criticality_input):
+        return RustCriticalityAssessment(
+            criticality_index=10.0,
+            risk_level="critical",
+            reasons=("shadow-only criticality",),
+            semantic_metrics=RustSemanticMetrics(
+                old_node_count=0,
+                new_node_count=1,
+                old_token_count=0,
+                new_token_count=1,
+                matched_node_count=0,
+                survival_ratio=1.0,
+            ),
+            path_category="docs",
+            path_severity="low",
+        )
+
+    monkeypatch.setattr("rygnal.change_risk.evaluate_criticality", fake_evaluate)
+
+    shadow_report = classify_repo_changes(repo)
+
+    assert shadow_report.overall_risk_level == python_only_report.overall_risk_level
+    assert shadow_report.risk_counts == python_only_report.risk_counts
+
+    file_risk = risk_for_path(shadow_report, "docs/usage.md")
+    assert file_risk.risk_level == RiskLevel.LOW
+    assert file_risk.audit_summary["rust_criticality"]["risk_level"] == "critical"
+
+
+def test_rust_criticality_shadow_missing_kernel_does_not_crash(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from rygnal.rust_kernel import RustKernelUnavailableError
+
+    repo = create_repo(tmp_path)
+    src = repo / "src"
+    src.mkdir()
+    (src / "app.py").write_text("print('hello')\n", encoding="utf-8")
+
+    def fail_evaluate(criticality_input):
+        raise RustKernelUnavailableError(
+            "optional Rust kernel extension is not installed or failed to load"
+        )
+
+    monkeypatch.setattr("rygnal.change_risk.evaluate_criticality", fail_evaluate)
+
+    report = classify_repo_changes(repo)
+
+    file_risk = risk_for_path(report, "src/app.py")
+    shadow = file_risk.audit_summary["rust_criticality"]
+
+    assert file_risk.risk_level == RiskLevel.MEDIUM
+    assert report.overall_risk_level == RiskLevel.MEDIUM
+    assert shadow["available"] is False
+    assert shadow["error_code"] == "rust-kernel-unavailable"
+    assert "failed to load" in shadow["error_reason"]
+
+
+def test_rust_criticality_shadow_generic_adapter_error_does_not_crash(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from rygnal.rust_kernel import RustKernelError
+
+    repo = create_repo(tmp_path)
+    src = repo / "src"
+    src.mkdir()
+    (src / "app.py").write_text("print('hello')\n", encoding="utf-8")
+
+    def fail_evaluate(criticality_input):
+        raise RustKernelError("rust kernel returned invalid JSON")
+
+    monkeypatch.setattr("rygnal.change_risk.evaluate_criticality", fail_evaluate)
+
+    report = classify_repo_changes(repo)
+
+    file_risk = risk_for_path(report, "src/app.py")
+    shadow = file_risk.audit_summary["rust_criticality"]
+
+    assert file_risk.risk_level == RiskLevel.MEDIUM
+    assert report.overall_risk_level == RiskLevel.MEDIUM
+    assert shadow["available"] is False
+    assert shadow["error_code"] == "rust-kernel-error"
+    assert shadow["error_reason"] == "rust kernel returned invalid JSON"
+
+
+def test_rust_criticality_shadow_structured_domain_error_is_preserved(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from rygnal.rust_kernel import RustCriticalityEvaluationError
+
+    repo = create_repo(tmp_path)
+    src = repo / "src"
+    src.mkdir()
+    (src / "app.py").write_text("print('hello')\n", encoding="utf-8")
+
+    def fail_evaluate(criticality_input):
+        raise RustCriticalityEvaluationError(
+            error_code="parent-traversal",
+            reason="path must not traverse outside repository",
+        )
+
+    monkeypatch.setattr("rygnal.change_risk.evaluate_criticality", fail_evaluate)
+
+    report = classify_repo_changes(repo)
+
+    file_risk = risk_for_path(report, "src/app.py")
+    shadow = file_risk.audit_summary["rust_criticality"]
+
+    assert file_risk.risk_level == RiskLevel.MEDIUM
+    assert report.overall_risk_level == RiskLevel.MEDIUM
+    assert shadow["available"] is False
+    assert shadow["error_code"] == "parent-traversal"
+    assert shadow["error_reason"] == "path must not traverse outside repository"
+
+
+def test_rust_criticality_shadow_bypasses_binary_files(
+    monkeypatch,
+) -> None:
+    calls = 0
+
+    def fake_evaluate(criticality_input):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("Rust criticality should not be called for binary files")
+
+    monkeypatch.setattr("rygnal.change_risk.evaluate_criticality", fake_evaluate)
+
+    patch_file = PatchFileDiff(
+        path="artifact.bin",
+        kind=ChangedFileKind.UNTRACKED,
+        additions=None,
+        deletions=None,
+        binary=True,
+    )
+    patch = PatchDiff(
+        workspace_path="/tmp/workspace",
+        baseline_commit_sha="a" * 40,
+        patch="diff --git a/artifact.bin b/artifact.bin\n",
+        patch_sha256="b" * 64,
+        patch_size_bytes=42,
+        files=(patch_file,),
+    )
+
+    report = classify_patch_risk(patch)
+
+    file_risk = risk_for_path(report, "artifact.bin")
+    shadow = file_risk.audit_summary["rust_criticality"]
+
+    assert calls == 0
+    assert file_risk.risk_level == RiskLevel.HIGH
+    assert shadow["available"] is False
+    assert shadow["error_code"] == "binary-file"
+    assert shadow["error_reason"] == (
+        "binary files are excluded from Rust criticality shadow analysis"
+    )
+
+
+def test_rust_criticality_shadow_bypasses_massive_files(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from rygnal.change_risk import MAX_CRITICALITY_SHADOW_BYTES
+
+    calls = 0
+
+    def fake_evaluate(criticality_input):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("Rust criticality should not be called for oversized files")
+
+    monkeypatch.setattr("rygnal.change_risk.evaluate_criticality", fake_evaluate)
+
+    repo = create_repo(tmp_path)
+    large_file = repo / "large.json"
+    large_file.write_text("x" * (MAX_CRITICALITY_SHADOW_BYTES + 1), encoding="utf-8")
+
+    report = classify_repo_changes(repo)
+
+    file_risk = risk_for_path(report, "large.json")
+    shadow = file_risk.audit_summary["rust_criticality"]
+
+    assert calls == 0
+    assert file_risk.risk_level == RiskLevel.MEDIUM
+    assert shadow["available"] is False
+    assert shadow["error_code"] == "file-too-large"
+    assert shadow["error_reason"] == "file size exceeds shadow mode criticality limits"
+
+
+def test_rust_criticality_shadow_loads_deleted_file_content(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from rygnal.rust_kernel import RustCriticalityAssessment, RustSemanticMetrics
+
+    repo = create_repo(tmp_path)
+    target = repo / "src"
+    target.mkdir()
+    deleted_file = target / "delete_me.py"
+    deleted_file.write_text("print('old')\n", encoding="utf-8")
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "add file")
+    baseline = baseline_sha(repo)
+
+    deleted_file.unlink()
+
+    captured = {}
+
+    def fake_evaluate(criticality_input):
+        captured["input"] = criticality_input
+        return RustCriticalityAssessment(
+            criticality_index=1.0,
+            risk_level="low",
+            reasons=(),
+            semantic_metrics=RustSemanticMetrics(
+                old_node_count=1,
+                new_node_count=0,
+                old_token_count=3,
+                new_token_count=0,
+                matched_node_count=0,
+                survival_ratio=1.0,
+            ),
+            path_category="source",
+            path_severity="medium",
+        )
+
+    monkeypatch.setattr("rygnal.change_risk.evaluate_criticality", fake_evaluate)
+
+    report = classify_patch_risk(generate_patch_diff(repo, baseline))
+
+    file_risk = risk_for_path(report, "src/delete_me.py")
+    assert file_risk.audit_summary["rust_criticality"]["available"] is True
+    assert captured["input"].file_path == "src/delete_me.py"
+    assert captured["input"].action_type == "deleted"
+    assert captured["input"].old_code == "print('old')\n"
+    assert captured["input"].new_code == ""
+
+
+def test_rust_criticality_shadow_loads_untracked_file_content(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from rygnal.rust_kernel import RustCriticalityAssessment, RustSemanticMetrics
+
+    repo = create_repo(tmp_path)
+    src = repo / "src"
+    src.mkdir()
+    new_file = src / "new_app.py"
+    new_file.write_text("print('new')\n", encoding="utf-8")
+
+    captured = {}
+
+    def fake_evaluate(criticality_input):
+        captured["input"] = criticality_input
+        return RustCriticalityAssessment(
+            criticality_index=1.0,
+            risk_level="low",
+            reasons=(),
+            semantic_metrics=RustSemanticMetrics(
+                old_node_count=0,
+                new_node_count=1,
+                old_token_count=0,
+                new_token_count=3,
+                matched_node_count=0,
+                survival_ratio=1.0,
+            ),
+            path_category="source",
+            path_severity="medium",
+        )
+
+    monkeypatch.setattr("rygnal.change_risk.evaluate_criticality", fake_evaluate)
+
+    report = classify_repo_changes(repo)
+
+    file_risk = risk_for_path(report, "src/new_app.py")
+    assert file_risk.audit_summary["rust_criticality"]["available"] is True
+    assert captured["input"].file_path == "src/new_app.py"
+    assert captured["input"].action_type == "untracked"
+    assert captured["input"].old_code == ""
+    assert captured["input"].new_code == "print('new')\n"
+
+
+def test_rust_criticality_shadow_loads_renamed_file_from_old_and_new_paths(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from rygnal.rust_kernel import RustCriticalityAssessment, RustSemanticMetrics
+
+    repo = create_repo(tmp_path)
+    src = repo / "src"
+    src.mkdir()
+    old_file = src / "old.py"
+    old_file.write_text("print('same')\n", encoding="utf-8")
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "add old file")
+    baseline = baseline_sha(repo)
+
+    run_git(repo, "mv", "src/old.py", "src/new.py")
+
+    captured = {}
+
+    def fake_evaluate(criticality_input):
+        captured["input"] = criticality_input
+        return RustCriticalityAssessment(
+            criticality_index=1.0,
+            risk_level="low",
+            reasons=(),
+            semantic_metrics=RustSemanticMetrics(
+                old_node_count=1,
+                new_node_count=1,
+                old_token_count=3,
+                new_token_count=3,
+                matched_node_count=1,
+                survival_ratio=1.0,
+            ),
+            path_category="source",
+            path_severity="medium",
+        )
+
+    monkeypatch.setattr("rygnal.change_risk.evaluate_criticality", fake_evaluate)
+
+    report = classify_patch_risk(generate_patch_diff(repo, baseline))
+
+    file_risk = risk_for_path(report, "src/new.py")
+    assert file_risk.old_path == "src/old.py"
+    assert file_risk.audit_summary["rust_criticality"]["available"] is True
+    assert captured["input"].file_path == "src/new.py"
+    assert captured["input"].action_type == "renamed"
+    assert captured["input"].old_code == "print('same')\n"
+    assert captured["input"].new_code == "print('same')\n"
+
+
+def test_rust_criticality_shadow_content_unavailable_does_not_crash(
+    monkeypatch,
+) -> None:
+    calls = 0
+
+    def fake_evaluate(criticality_input):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("Rust criticality should not be called if content is unavailable")
+
+    monkeypatch.setattr("rygnal.change_risk.evaluate_criticality", fake_evaluate)
+
+    patch_file = PatchFileDiff(
+        path="missing.py",
+        kind=ChangedFileKind.MODIFIED,
+        additions=1,
+        deletions=1,
+        binary=False,
+    )
+    patch = PatchDiff(
+        workspace_path="/tmp/workspace-that-does-not-exist",
+        baseline_commit_sha="a" * 40,
+        patch="diff --git a/missing.py b/missing.py\n",
+        patch_sha256="b" * 64,
+        patch_size_bytes=42,
+        files=(patch_file,),
+    )
+
+    report = classify_patch_risk(patch)
+
+    file_risk = risk_for_path(report, "missing.py")
+    shadow = file_risk.audit_summary["rust_criticality"]
+
+    assert calls == 0
+    assert file_risk.risk_level == RiskLevel.MEDIUM
+    assert shadow["available"] is False
+    assert shadow["error_code"] == "content-unavailable"
+    assert "file contents could not be loaded" in shadow["error_reason"]

@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import fnmatch
 import re
+import subprocess  # nosec B404
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import cached_property
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 from rygnal.changed_files import ChangedFileKind, normalize_repo_relative_path
 from rygnal.diff_limits import (
@@ -24,6 +25,14 @@ from rygnal.diff_limits import (
 )
 from rygnal.patch_diff import PatchDiff, PatchFileDiff
 from rygnal.risk_engine import RiskLevel
+from rygnal.rust_kernel import (
+    RustCriticalityAssessment,
+    RustCriticalityEvaluationError,
+    RustCriticalityInput,
+    RustKernelError,
+    RustKernelUnavailableError,
+    evaluate_criticality,
+)
 
 RISK_LEVEL_ORDER: dict[RiskLevel, int] = {
     RiskLevel.LOW: 0,
@@ -31,6 +40,8 @@ RISK_LEVEL_ORDER: dict[RiskLevel, int] = {
     RiskLevel.HIGH: 2,
     RiskLevel.CRITICAL: 3,
 }
+
+MAX_CRITICALITY_SHADOW_BYTES = 1_000_000
 
 
 DOC_EXTENSIONS = {
@@ -295,6 +306,35 @@ class ChangeRiskReason:
 
 
 @dataclass(frozen=True)
+class RustCriticalityShadow:
+    """Observe-only Rust criticality result attached to file risk output."""
+
+    available: bool
+    criticality_index: float | None = None
+    risk_level: str | None = None
+    reasons: tuple[str, ...] = ()
+    semantic_metrics: dict[str, object] | None = None
+    path_category: str | None = None
+    path_severity: str | None = None
+    error_code: str | None = None
+    error_reason: str | None = None
+
+    @cached_property
+    def audit_summary(self) -> dict[str, object]:
+        return {
+            "available": self.available,
+            "criticality_index": self.criticality_index,
+            "risk_level": self.risk_level,
+            "reasons": self.reasons,
+            "semantic_metrics": self.semantic_metrics,
+            "path_category": self.path_category,
+            "path_severity": self.path_severity,
+            "error_code": self.error_code,
+            "error_reason": self.error_reason,
+        }
+
+
+@dataclass(frozen=True)
 class FileRiskClassification:
     """Risk classification for one changed guarded-workspace file."""
 
@@ -309,6 +349,7 @@ class FileRiskClassification:
     old_mode: str | None = None
     new_mode: str | None = None
     mode_changed: bool = False
+    rust_criticality: RustCriticalityShadow | None = None
 
     @cached_property
     def audit_summary(self) -> dict[str, object]:
@@ -324,6 +365,9 @@ class FileRiskClassification:
             "new_mode": self.new_mode,
             "mode_changed": self.mode_changed,
             "reasons": tuple(reason.audit_summary for reason in self.reasons),
+            "rust_criticality": (
+                self.rust_criticality.audit_summary if self.rust_criticality else None
+            ),
         }
 
 
@@ -378,7 +422,10 @@ def classify_patch_risk(
 
     added_lines_by_path = extract_added_lines_by_path(patch_diff.patch)
     files = tuple(
-        classify_patch_file_risk(file_diff, added_lines_by_path=added_lines_by_path)
+        _attach_criticality_shadow(
+            classify_patch_file_risk(file_diff, added_lines_by_path=added_lines_by_path),
+            _criticality_shadow_for_file(patch_diff, file_diff),
+        )
         for file_diff in patch_diff.files
     )
     diff_limit_reasons = tuple(
@@ -395,6 +442,26 @@ def classify_patch_risk(
         patch_sha256=patch_diff.patch_sha256,
         files=files,
         report_reasons=report_reasons,
+    )
+
+
+def _attach_criticality_shadow(
+    file_risk: FileRiskClassification,
+    rust_criticality: RustCriticalityShadow,
+) -> FileRiskClassification:
+    return FileRiskClassification(
+        path=file_risk.path,
+        old_path=file_risk.old_path,
+        kind=file_risk.kind,
+        risk_level=file_risk.risk_level,
+        reasons=file_risk.reasons,
+        additions=file_risk.additions,
+        deletions=file_risk.deletions,
+        binary=file_risk.binary,
+        old_mode=file_risk.old_mode,
+        new_mode=file_risk.new_mode,
+        mode_changed=file_risk.mode_changed,
+        rust_criticality=rust_criticality,
     )
 
 
@@ -430,6 +497,185 @@ def classify_patch_file_risk(
         old_mode=file_diff.old_mode,
         new_mode=file_diff.new_mode,
         mode_changed=file_diff.mode_changed,
+    )
+
+
+def _criticality_shadow_for_file(
+    patch_diff: PatchDiff,
+    file_diff: PatchFileDiff,
+) -> RustCriticalityShadow:
+    if file_diff.binary:
+        return _criticality_failure_shadow(
+            error_code="binary-file",
+            error_reason="binary files are excluded from Rust criticality shadow analysis",
+        )
+
+    try:
+        old_code, new_code = _load_criticality_file_contents(patch_diff, file_diff)
+    except Exception as exc:
+        return _criticality_failure_shadow(
+            error_code="content-unavailable",
+            error_reason=(
+                f"file contents could not be loaded for Rust criticality shadow analysis: {exc}"
+            ),
+        )
+
+    if _shadow_text_size_bytes(old_code, new_code) > MAX_CRITICALITY_SHADOW_BYTES:
+        return _criticality_failure_shadow(
+            error_code="file-too-large",
+            error_reason="file size exceeds shadow mode criticality limits",
+        )
+
+    try:
+        assessment = evaluate_criticality(
+            RustCriticalityInput(
+                file_path=normalize_repo_relative_path(file_diff.path),
+                action_type=file_diff.kind.value,
+                old_code=old_code,
+                new_code=new_code,
+            )
+        )
+    except Exception as exc:
+        return _criticality_exception_shadow(exc)
+
+    return _criticality_success_shadow(assessment)
+
+
+def _load_criticality_file_contents(
+    patch_diff: PatchDiff,
+    file_diff: PatchFileDiff,
+) -> tuple[str, str]:
+    workspace = Path(patch_diff.workspace_path).resolve()
+    old_path = normalize_repo_relative_path(file_diff.old_path or file_diff.path)
+    new_path = normalize_repo_relative_path(file_diff.path)
+
+    old_size = 0
+    new_size = 0
+
+    if file_diff.kind not in {ChangedFileKind.ADDED, ChangedFileKind.UNTRACKED}:
+        old_size = _baseline_file_size(
+            workspace,
+            patch_diff.baseline_commit_sha,
+            old_path,
+        )
+
+    if file_diff.kind is not ChangedFileKind.DELETED:
+        new_size = _workspace_file_size(workspace, new_path)
+
+    if old_size + new_size > MAX_CRITICALITY_SHADOW_BYTES:
+        return "x" * (MAX_CRITICALITY_SHADOW_BYTES + 1), ""
+
+    old_code = ""
+    new_code = ""
+
+    if file_diff.kind not in {ChangedFileKind.ADDED, ChangedFileKind.UNTRACKED}:
+        old_code = _read_baseline_file_text(
+            workspace,
+            patch_diff.baseline_commit_sha,
+            old_path,
+        )
+
+    if file_diff.kind is not ChangedFileKind.DELETED:
+        new_code = _read_workspace_file_text(workspace, new_path)
+
+    return old_code, new_code
+
+
+def _baseline_file_size(workspace: Path, baseline_commit_sha: str, path: str) -> int:
+    result = subprocess.run(
+        ["git", "cat-file", "-s", f"{baseline_commit_sha}:{path}"],
+        cwd=workspace,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return int(result.stdout.strip())
+
+
+def _workspace_file_size(workspace: Path, path: str) -> int:
+    return (workspace / path).stat().st_size
+
+
+def _read_baseline_file_text(
+    workspace: Path,
+    baseline_commit_sha: str,
+    path: str,
+) -> str:
+    result = subprocess.run(
+        ["git", "show", f"{baseline_commit_sha}:{path}"],
+        cwd=workspace,
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    return result.stdout
+
+
+def _read_workspace_file_text(workspace: Path, path: str) -> str:
+    return (workspace / path).read_text(encoding="utf-8")
+
+
+def _shadow_text_size_bytes(*values: str) -> int:
+    return sum(len(value.encode("utf-8", errors="ignore")) for value in values)
+
+
+def _criticality_success_shadow(
+    assessment: RustCriticalityAssessment,
+) -> RustCriticalityShadow:
+    metrics = assessment.semantic_metrics
+    return RustCriticalityShadow(
+        available=True,
+        criticality_index=assessment.criticality_index,
+        risk_level=assessment.risk_level,
+        reasons=assessment.reasons,
+        semantic_metrics={
+            "old_node_count": metrics.old_node_count,
+            "new_node_count": metrics.new_node_count,
+            "old_token_count": metrics.old_token_count,
+            "new_token_count": metrics.new_token_count,
+            "matched_node_count": metrics.matched_node_count,
+            "survival_ratio": metrics.survival_ratio,
+        },
+        path_category=assessment.path_category,
+        path_severity=assessment.path_severity,
+    )
+
+
+def _criticality_failure_shadow(
+    *,
+    error_code: str,
+    error_reason: str,
+) -> RustCriticalityShadow:
+    return RustCriticalityShadow(
+        available=False,
+        error_code=error_code,
+        error_reason=error_reason,
+    )
+
+
+def _criticality_exception_shadow(exc: Exception) -> RustCriticalityShadow:
+    if isinstance(exc, RustKernelUnavailableError):
+        return _criticality_failure_shadow(
+            error_code="rust-kernel-unavailable",
+            error_reason=str(exc),
+        )
+
+    if isinstance(exc, RustCriticalityEvaluationError):
+        return _criticality_failure_shadow(
+            error_code=exc.error_code,
+            error_reason=exc.reason,
+        )
+
+    if isinstance(exc, RustKernelError):
+        return _criticality_failure_shadow(
+            error_code="rust-kernel-error",
+            error_reason=str(exc),
+        )
+
+    return _criticality_failure_shadow(
+        error_code="rust-criticality-unexpected-error",
+        error_reason=str(exc),
     )
 
 
@@ -757,7 +1003,9 @@ __all__ = [
     "ChangeRiskReason",
     "ChangeRiskReport",
     "FileRiskClassification",
+    "MAX_CRITICALITY_SHADOW_BYTES",
     "RISK_LEVEL_ORDER",
+    "RustCriticalityShadow",
     "classify_patch_file_risk",
     "classify_patch_risk",
     "extract_added_lines_by_path",

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import fnmatch
 import re
+import shutil
 import subprocess  # nosec B404
 from collections import Counter
 from collections.abc import Iterable
@@ -741,9 +742,17 @@ def _load_criticality_file_contents(
     return old_code, new_code
 
 
+def _git_executable() -> str:
+    git = shutil.which("git")
+    if git is None:
+        raise FileNotFoundError("git executable was not found on PATH")
+
+    return git
+
+
 def _baseline_file_size(workspace: Path, baseline_commit_sha: str, path: str) -> int:
-    result = subprocess.run(
-        ["git", "cat-file", "-s", f"{baseline_commit_sha}:{path}"],
+    result = subprocess.run(  # nosec B603
+        [_git_executable(), "cat-file", "-s", f"{baseline_commit_sha}:{path}"],
         cwd=workspace,
         check=True,
         capture_output=True,
@@ -761,8 +770,8 @@ def _read_baseline_file_text(
     baseline_commit_sha: str,
     path: str,
 ) -> str:
-    result = subprocess.run(
-        ["git", "show", f"{baseline_commit_sha}:{path}"],
+    result = subprocess.run(  # nosec B603
+        [_git_executable(), "show", f"{baseline_commit_sha}:{path}"],
         cwd=workspace,
         check=True,
         capture_output=True,

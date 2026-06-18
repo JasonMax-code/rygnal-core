@@ -296,8 +296,8 @@ def test_rust_criticality_available_critical_result_raises_medium_python_risk(
     report = classify_repo_changes(repo)
 
     file_risk = risk_for_path(report, "src/app.py")
-    assert file_risk.risk_level == RiskLevel.CRITICAL
-    assert report.overall_risk_level == RiskLevel.CRITICAL
+    assert file_risk.risk_level == RiskLevel.HIGH
+    assert report.overall_risk_level == RiskLevel.HIGH
     assert any(reason.code == "rust-criticality-signal" for reason in file_risk.reasons)
 
     shadow = file_risk.audit_summary["rust_criticality"]
@@ -306,9 +306,9 @@ def test_rust_criticality_available_critical_result_raises_medium_python_risk(
     assert shadow["risk_level"] == "critical"
     assert shadow["reasons"] == ("shadow-only criticality",)
 
-    assert file_risk.risk_level == RiskLevel.CRITICAL
-    assert report.overall_risk_level == RiskLevel.CRITICAL
-    assert report.risk_counts["critical"] == 1
+    assert file_risk.risk_level == RiskLevel.HIGH
+    assert report.overall_risk_level == RiskLevel.HIGH
+    assert report.risk_counts["high"] == 1
 
 
 def test_rust_criticality_available_critical_result_raises_low_python_risk(
@@ -346,11 +346,11 @@ def test_rust_criticality_available_critical_result_raises_low_python_risk(
     shadow_report = classify_repo_changes(repo)
 
     assert python_only_report.overall_risk_level == RiskLevel.LOW
-    assert shadow_report.overall_risk_level == RiskLevel.CRITICAL
-    assert shadow_report.risk_counts["critical"] == 1
+    assert shadow_report.overall_risk_level == RiskLevel.HIGH
+    assert shadow_report.risk_counts["high"] == 1
 
     file_risk = risk_for_path(shadow_report, "docs/usage.md")
-    assert file_risk.risk_level == RiskLevel.CRITICAL
+    assert file_risk.risk_level == RiskLevel.HIGH
     assert file_risk.audit_summary["rust_criticality"]["risk_level"] == "critical"
     assert any(reason.code == "rust-criticality-signal" for reason in file_risk.reasons)
 

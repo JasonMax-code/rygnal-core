@@ -1,0 +1,543 @@
+#![allow(dead_code)] // Task 2 adds the evaluator; Task 3 exposes it through PyO3.
+
+use crate::ast::{analyze_python_survival, AstError};
+use crate::models::{
+    CriticalityAssessment, CriticalityInput, CriticalityRiskLevel, FileActionType,
+    PathSensitivityCategory, PathSensitivitySeverity, SemanticMetrics,
+};
+use crate::path_safety;
+use crate::path_safety::PathSafetyError;
+use std::collections::BTreeMap;
+
+const MAX_CRITICALITY: f64 = 10.0;
+
+#[derive(Debug)]
+pub enum CriticalityError {
+    InvalidPath(PathSafetyError),
+    InvalidPathCategory(String),
+    InvalidPathSeverity(String),
+    Ast(AstError),
+}
+
+impl std::fmt::Display for CriticalityError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CriticalityError::InvalidPath(err) => write!(formatter, "{err}"),
+            CriticalityError::InvalidPathCategory(category) => {
+                write!(formatter, "unknown path sensitivity category: {category}")
+            }
+            CriticalityError::InvalidPathSeverity(severity) => {
+                write!(formatter, "unknown path sensitivity severity: {severity}")
+            }
+            CriticalityError::Ast(err) => write!(formatter, "{err}"),
+        }
+    }
+}
+
+impl std::error::Error for CriticalityError {}
+
+impl From<PathSafetyError> for CriticalityError {
+    fn from(value: PathSafetyError) -> Self {
+        CriticalityError::InvalidPath(value)
+    }
+}
+
+impl From<AstError> for CriticalityError {
+    fn from(value: AstError) -> Self {
+        CriticalityError::Ast(value)
+    }
+}
+
+pub fn evaluate_criticality(
+    input: &CriticalityInput,
+) -> Result<CriticalityAssessment, CriticalityError> {
+    let normalized_path = path_safety::validate_repo_relative_path(&input.file_path)?;
+    let sensitivity = path_safety::classify_path_sensitivity(&normalized_path)?;
+    let path_category = path_category_from_str(&sensitivity.category)?;
+    let path_severity = path_severity_from_str(&sensitivity.severity)?;
+    let semantic_metrics = semantic_metrics_for_input(input, &normalized_path)?;
+
+    let path_base = path_base_score(path_category);
+    let action_modifier = action_modifier(input.action_type);
+    let semantic_modifier = semantic_modifier(
+        input.action_type,
+        semantic_metrics.survival_ratio,
+        &input.old_code,
+    );
+
+    let criticality_index = clamp_criticality(path_base + action_modifier + semantic_modifier);
+    let risk_level = risk_level_for_score(criticality_index);
+
+    let reasons = build_reasons(CriticalityReasonContext {
+        input,
+        category: path_category,
+        severity: path_severity,
+        action_modifier,
+        semantic_metrics,
+        semantic_modifier,
+        risk_level,
+        used_python_ast: is_python_path(&normalized_path),
+    });
+
+    Ok(CriticalityAssessment {
+        criticality_index,
+        risk_level,
+        reasons,
+        semantic_metrics,
+        path_category,
+        path_severity,
+    })
+}
+
+fn semantic_metrics_for_input(
+    input: &CriticalityInput,
+    normalized_path: &str,
+) -> Result<SemanticMetrics, CriticalityError> {
+    if input.old_code.trim().is_empty() && input.new_code.trim().is_empty() {
+        return Ok(empty_semantic_metrics());
+    }
+
+    if is_python_path(normalized_path) {
+        return analyze_python_survival(&input.old_code, &input.new_code)
+            .map_err(CriticalityError::from);
+    }
+
+    Ok(text_survival_metrics(&input.old_code, &input.new_code))
+}
+
+fn text_survival_metrics(old_code: &str, new_code: &str) -> SemanticMetrics {
+    let old_lines = normalized_non_empty_lines(old_code);
+    let new_lines = normalized_non_empty_lines(new_code);
+
+    let old_count = old_lines.len();
+    let new_count = new_lines.len();
+
+    let matched = count_multiset_intersection(&old_lines, &new_lines);
+
+    let survival_ratio = if old_count == 0 {
+        1.0
+    } else {
+        matched as f64 / old_count as f64
+    };
+
+    SemanticMetrics {
+        old_node_count: 0,
+        new_node_count: 0,
+        old_token_count: old_count,
+        new_token_count: new_count,
+        matched_node_count: matched,
+        survival_ratio: clamp_unit(survival_ratio),
+    }
+}
+
+fn normalized_non_empty_lines(code: &str) -> Vec<String> {
+    code.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn count_multiset_intersection(old_lines: &[String], new_lines: &[String]) -> usize {
+    let mut new_counts: BTreeMap<&str, usize> = BTreeMap::new();
+
+    for line in new_lines {
+        let count = new_counts.entry(line.as_str()).or_insert(0);
+        *count = count.saturating_add(1);
+    }
+
+    old_lines
+        .iter()
+        .filter(|line| {
+            let Some(count) = new_counts.get_mut(line.as_str()) else {
+                return false;
+            };
+
+            if *count == 0 {
+                return false;
+            }
+
+            *count -= 1;
+            true
+        })
+        .count()
+}
+
+fn empty_semantic_metrics() -> SemanticMetrics {
+    SemanticMetrics {
+        old_node_count: 0,
+        new_node_count: 0,
+        old_token_count: 0,
+        new_token_count: 0,
+        matched_node_count: 0,
+        survival_ratio: 1.0,
+    }
+}
+
+fn path_base_score(category: PathSensitivityCategory) -> f64 {
+    match category {
+        PathSensitivityCategory::Secret => 9.0,
+        PathSensitivityCategory::Ci | PathSensitivityCategory::Policy => 6.5,
+        PathSensitivityCategory::Dependency => 6.0,
+        PathSensitivityCategory::Config => 4.5,
+        PathSensitivityCategory::Normal => 3.0,
+        PathSensitivityCategory::Test => 1.5,
+        PathSensitivityCategory::Documentation | PathSensitivityCategory::Generated => 1.0,
+    }
+}
+
+fn action_modifier(action_type: FileActionType) -> f64 {
+    match action_type {
+        FileActionType::Deleted => 3.0,
+        FileActionType::Renamed | FileActionType::ModeChanged => 1.0,
+        FileActionType::Added | FileActionType::Untracked => 0.5,
+        FileActionType::Modified => 0.0,
+    }
+}
+
+fn semantic_modifier(action_type: FileActionType, survival_ratio: f64, old_code: &str) -> f64 {
+    if action_type == FileActionType::Added || old_code.trim().is_empty() {
+        return 0.0;
+    }
+
+    if action_type == FileActionType::Deleted {
+        return 3.0;
+    }
+
+    let survival_ratio = clamp_unit(survival_ratio);
+
+    if survival_ratio < 0.25 {
+        3.0
+    } else if survival_ratio < 0.50 {
+        2.0
+    } else if survival_ratio < 0.75 {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+fn risk_level_for_score(score: f64) -> CriticalityRiskLevel {
+    if score >= 7.5 {
+        CriticalityRiskLevel::Critical
+    } else if score >= 5.0 {
+        CriticalityRiskLevel::High
+    } else if score >= 2.5 {
+        CriticalityRiskLevel::Medium
+    } else {
+        CriticalityRiskLevel::Low
+    }
+}
+
+struct CriticalityReasonContext<'a> {
+    input: &'a CriticalityInput,
+    category: PathSensitivityCategory,
+    severity: PathSensitivitySeverity,
+    action_modifier: f64,
+    semantic_metrics: SemanticMetrics,
+    semantic_modifier: f64,
+    risk_level: CriticalityRiskLevel,
+    used_python_ast: bool,
+}
+
+fn build_reasons(context: CriticalityReasonContext<'_>) -> Vec<String> {
+    let mut reasons = Vec::new();
+
+    reasons.push(format!(
+        "Path category {} has {} sensitivity.",
+        context.category.as_str(),
+        context.severity.as_str()
+    ));
+
+    if context.action_modifier > 0.0 {
+        reasons.push(format!(
+            "File action {} increases criticality by {:.1}.",
+            context.input.action_type.as_str(),
+            context.action_modifier
+        ));
+    }
+
+    if context.used_python_ast {
+        reasons.push(format!(
+            "Python semantic survival ratio is {:.4}.",
+            context.semantic_metrics.survival_ratio
+        ));
+    } else {
+        reasons.push(format!(
+            "Whitespace-normalized text survival ratio is {:.4}.",
+            context.semantic_metrics.survival_ratio
+        ));
+    }
+
+    if context.input.action_type == FileActionType::Added {
+        reasons.push("Added files are not penalized for semantic destruction.".to_string());
+    } else if context.input.old_code.trim().is_empty() {
+        reasons.push("Empty old code has no semantic destruction penalty.".to_string());
+    } else if context.semantic_modifier > 0.0 {
+        reasons.push(format!(
+            "Semantic destruction increases criticality by {:.1}.",
+            context.semantic_modifier
+        ));
+    }
+
+    reasons.push(format!(
+        "Final criticality level: {}.",
+        context.risk_level.as_str()
+    ));
+
+    reasons
+}
+
+fn path_category_from_str(category: &str) -> Result<PathSensitivityCategory, CriticalityError> {
+    match category {
+        "secret" => Ok(PathSensitivityCategory::Secret),
+        "ci" => Ok(PathSensitivityCategory::Ci),
+        "policy" => Ok(PathSensitivityCategory::Policy),
+        "dependency" => Ok(PathSensitivityCategory::Dependency),
+        "config" => Ok(PathSensitivityCategory::Config),
+        "generated" => Ok(PathSensitivityCategory::Generated),
+        "test" => Ok(PathSensitivityCategory::Test),
+        "documentation" => Ok(PathSensitivityCategory::Documentation),
+        "normal" => Ok(PathSensitivityCategory::Normal),
+        other => Err(CriticalityError::InvalidPathCategory(other.to_string())),
+    }
+}
+
+fn path_severity_from_str(severity: &str) -> Result<PathSensitivitySeverity, CriticalityError> {
+    match severity {
+        "low" => Ok(PathSensitivitySeverity::Low),
+        "medium" => Ok(PathSensitivitySeverity::Medium),
+        "high" => Ok(PathSensitivitySeverity::High),
+        "critical" => Ok(PathSensitivitySeverity::Critical),
+        other => Err(CriticalityError::InvalidPathSeverity(other.to_string())),
+    }
+}
+
+impl FileActionType {
+    fn as_str(self) -> &'static str {
+        match self {
+            FileActionType::Added => "added",
+            FileActionType::Modified => "modified",
+            FileActionType::Deleted => "deleted",
+            FileActionType::Renamed => "renamed",
+            FileActionType::ModeChanged => "mode_changed",
+            FileActionType::Untracked => "untracked",
+        }
+    }
+}
+
+impl CriticalityRiskLevel {
+    fn as_str(self) -> &'static str {
+        match self {
+            CriticalityRiskLevel::Low => "low",
+            CriticalityRiskLevel::Medium => "medium",
+            CriticalityRiskLevel::High => "high",
+            CriticalityRiskLevel::Critical => "critical",
+        }
+    }
+}
+
+impl PathSensitivityCategory {
+    fn as_str(self) -> &'static str {
+        match self {
+            PathSensitivityCategory::Secret => "secret",
+            PathSensitivityCategory::Ci => "ci",
+            PathSensitivityCategory::Policy => "policy",
+            PathSensitivityCategory::Dependency => "dependency",
+            PathSensitivityCategory::Config => "config",
+            PathSensitivityCategory::Generated => "generated",
+            PathSensitivityCategory::Test => "test",
+            PathSensitivityCategory::Documentation => "documentation",
+            PathSensitivityCategory::Normal => "normal",
+        }
+    }
+}
+
+impl PathSensitivitySeverity {
+    fn as_str(self) -> &'static str {
+        match self {
+            PathSensitivitySeverity::Low => "low",
+            PathSensitivitySeverity::Medium => "medium",
+            PathSensitivitySeverity::High => "high",
+            PathSensitivitySeverity::Critical => "critical",
+        }
+    }
+}
+
+fn is_python_path(path: &str) -> bool {
+    path.ends_with(".py") || path.ends_with(".pyi")
+}
+
+fn clamp_criticality(value: f64) -> f64 {
+    if !value.is_finite() {
+        return MAX_CRITICALITY;
+    }
+
+    value.clamp(0.0, MAX_CRITICALITY)
+}
+
+fn clamp_unit(value: f64) -> f64 {
+    if !value.is_finite() {
+        return 0.0;
+    }
+
+    value.clamp(0.0, 1.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn input(
+        file_path: &str,
+        action_type: FileActionType,
+        old_code: &str,
+        new_code: &str,
+    ) -> CriticalityInput {
+        CriticalityInput {
+            file_path: file_path.to_string(),
+            action_type,
+            old_code: old_code.to_string(),
+            new_code: new_code.to_string(),
+        }
+    }
+
+    #[test]
+    fn added_harmless_python_file_does_not_get_destruction_penalty() {
+        let assessment = evaluate_criticality(&input(
+            "src/utils.py",
+            FileActionType::Added,
+            "",
+            "def helper():\n    return True\n",
+        ))
+        .expect("valid assessment");
+
+        assert_eq!(assessment.risk_level, CriticalityRiskLevel::Medium);
+        assert_eq!(assessment.semantic_metrics.survival_ratio, 1.0);
+        assert!(!assessment
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("Semantic destruction")));
+        assert!(assessment
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("Added files are not penalized")));
+    }
+
+    #[test]
+    fn renamed_file_uses_target_path_for_sensitivity() {
+        let assessment = evaluate_criticality(&input(
+            ".env",
+            FileActionType::Renamed,
+            "TOKEN=example\n",
+            "TOKEN=example\n",
+        ))
+        .expect("valid assessment");
+
+        assert_eq!(assessment.path_category, PathSensitivityCategory::Secret);
+        assert_eq!(assessment.path_severity, PathSensitivitySeverity::Critical);
+        assert_eq!(assessment.risk_level, CriticalityRiskLevel::Critical);
+    }
+
+    #[test]
+    fn non_python_text_fallback_ignores_indentation_only_changes() {
+        let assessment = evaluate_criticality(&input(
+            "config/settings.yml",
+            FileActionType::Modified,
+            "service:\n  enabled: true\n",
+            "service:\n    enabled: true\n",
+        ))
+        .expect("valid assessment");
+
+        assert_eq!(assessment.semantic_metrics.survival_ratio, 1.0);
+        assert!(!assessment
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("Semantic destruction")));
+    }
+
+    #[test]
+    fn deleting_empty_file_has_no_semantic_destruction_penalty() {
+        let assessment =
+            evaluate_criticality(&input("src/empty.py", FileActionType::Deleted, "", ""))
+                .expect("valid assessment");
+
+        assert_eq!(assessment.semantic_metrics.survival_ratio, 1.0);
+        assert!(!assessment
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("Semantic destruction")));
+        assert!(assessment
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("Empty old code")));
+    }
+
+    #[test]
+    fn secret_path_is_critical() {
+        let assessment = evaluate_criticality(&input(
+            ".env",
+            FileActionType::Modified,
+            "TOKEN=old\n",
+            "TOKEN=new\n",
+        ))
+        .expect("valid assessment");
+
+        assert_eq!(assessment.path_category, PathSensitivityCategory::Secret);
+        assert_eq!(assessment.risk_level, CriticalityRiskLevel::Critical);
+        assert!(assessment.criticality_index >= 9.0);
+    }
+
+    #[test]
+    fn dependency_path_is_high() {
+        let assessment = evaluate_criticality(&input(
+            "Cargo.toml",
+            FileActionType::Modified,
+            "[dependencies]\nold = \"1\"\n",
+            "[dependencies]\nnew = \"1\"\n",
+        ))
+        .expect("valid assessment");
+
+        assert_eq!(
+            assessment.path_category,
+            PathSensitivityCategory::Dependency
+        );
+        assert_eq!(assessment.risk_level, CriticalityRiskLevel::High);
+    }
+
+    #[test]
+    fn python_semantic_destruction_raises_risk() {
+        let assessment = evaluate_criticality(&input(
+            "src/service.py",
+            FileActionType::Modified,
+            "def important_business_rule():\n    account_limit = 100\n    return account_limit\n",
+            "def replacement():\n    return 1\n",
+        ))
+        .expect("valid assessment");
+
+        assert!(assessment.semantic_metrics.survival_ratio < 0.25);
+        assert_eq!(assessment.risk_level, CriticalityRiskLevel::High);
+        assert!(assessment
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("Semantic destruction")));
+    }
+
+    #[test]
+    fn invalid_path_returns_error() {
+        let err = evaluate_criticality(&input(
+            "../evil.py",
+            FileActionType::Modified,
+            "def old(): pass\n",
+            "def new(): pass\n",
+        ))
+        .expect_err("invalid path");
+
+        match err {
+            CriticalityError::InvalidPath(path_error) => {
+                assert_eq!(path_error.code(), "parent-traversal");
+            }
+            other => panic!("expected invalid path error, got {other:?}"),
+        }
+    }
+}

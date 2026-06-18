@@ -2,10 +2,16 @@ use crate::models::SemanticMetrics;
 use std::collections::BTreeMap;
 use tree_sitter::{Node, Parser};
 
+const MAX_AST_NAMED_NODES: usize = 50_000;
+
 #[derive(Debug)]
 pub enum AstError {
     LanguageLoad(String),
     ParseFailed,
+    AstTooLarge {
+        named_node_count: usize,
+        limit: usize,
+    },
     InvalidUtf8(String),
 }
 
@@ -16,6 +22,13 @@ impl std::fmt::Display for AstError {
                 write!(formatter, "failed to load Python grammar: {message}")
             }
             AstError::ParseFailed => write!(formatter, "tree-sitter failed to parse Python code"),
+            AstError::AstTooLarge {
+                named_node_count,
+                limit,
+            } => write!(
+                formatter,
+                "Python AST named node count {named_node_count} exceeds limit {limit}"
+            ),
             AstError::InvalidUtf8(message) => {
                 write!(
                     formatter,
@@ -84,7 +97,7 @@ fn extract_python_features(code: &str) -> Result<SyntaxFeatures, AstError> {
     let root = tree.root_node();
 
     let mut features = SyntaxFeatures {
-        named_node_count: count_named_nodes(root),
+        named_node_count: count_named_nodes(root)?,
         semantic_tokens: BTreeMap::new(),
     };
 
@@ -93,16 +106,34 @@ fn extract_python_features(code: &str) -> Result<SyntaxFeatures, AstError> {
     Ok(features)
 }
 
-fn count_named_nodes(node: Node<'_>) -> usize {
-    let mut count = usize::from(node.is_named());
+fn count_named_nodes(node: Node<'_>) -> Result<usize, AstError> {
+    let mut count = 0;
+    count_named_nodes_inner(node, &mut count)?;
+    Ok(count)
+}
 
-    for index in 0..node.child_count() {
-        if let Some(child) = node.child(index) {
-            count = count.saturating_add(count_named_nodes(child));
+fn count_named_nodes_inner(node: Node<'_>, count: &mut usize) -> Result<(), AstError> {
+    if node.kind() == "comment" {
+        return Ok(());
+    }
+
+    if node.is_named() {
+        *count = count.saturating_add(1);
+        if *count > MAX_AST_NAMED_NODES {
+            return Err(AstError::AstTooLarge {
+                named_node_count: *count,
+                limit: MAX_AST_NAMED_NODES,
+            });
         }
     }
 
-    count
+    for index in 0..node.child_count() {
+        if let Some(child) = node.child(index) {
+            count_named_nodes_inner(child, count)?;
+        }
+    }
+
+    Ok(())
 }
 
 fn collect_semantic_tokens(
@@ -110,6 +141,10 @@ fn collect_semantic_tokens(
     source: &[u8],
     tokens: &mut BTreeMap<String, usize>,
 ) -> Result<(), AstError> {
+    if node.kind() == "comment" {
+        return Ok(());
+    }
+
     match node.kind() {
         "function_definition" => {
             if let Some(name) = child_text_by_field(node, "name", source)? {
@@ -301,4 +336,48 @@ def replacement():
         assert_eq!(metrics.old_token_count, 0);
         assert_eq!(metrics.survival_ratio, 1.0);
     }
+
+    #[test]
+    fn python_survival_ignores_comment_only_changes() {
+        let old_code = r#"
+# keep this comment
+def stable():
+    value = 1
+    return value
+"#;
+        let new_code = r#"
+# changed comment text
+def stable():
+    value = 1
+    return value
+"#;
+
+        let metrics = analyze_python_survival(old_code, new_code).expect("valid Python");
+
+        assert_eq!(metrics.survival_ratio, 1.0);
+        assert_eq!(metrics.old_token_count, metrics.new_token_count);
+        assert_eq!(metrics.old_node_count, metrics.new_node_count);
+    }
+
+    #[test]
+    fn python_survival_rejects_ast_above_named_node_limit() {
+        let large_code = (0..20_000)
+            .map(|index| format!("value_{index} = {index}\n"))
+            .collect::<String>();
+
+        let error = analyze_python_survival(&large_code, &large_code)
+            .expect_err("large AST should be rejected");
+
+        match error {
+            AstError::AstTooLarge {
+                named_node_count,
+                limit,
+            } => {
+                assert!(named_node_count > limit);
+                assert_eq!(limit, MAX_AST_NAMED_NODES);
+            }
+            other => panic!("expected AstTooLarge, got {other:?}"),
+        }
+    }
+
 }

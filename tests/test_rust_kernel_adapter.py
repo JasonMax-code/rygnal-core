@@ -252,3 +252,230 @@ def test_rust_kernel_adapter_rejects_invalid_subjective_shape(
                 ),
             )
         )
+
+
+def test_rust_kernel_adapter_returns_criticality_assessment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from rygnal.rust_kernel import (
+        RustCriticalityAssessment,
+        RustCriticalityInput,
+        RustSemanticMetrics,
+        evaluate_criticality,
+    )
+
+    fake_kernel = types.SimpleNamespace(
+        evaluate_criticality=lambda payload: json.dumps(
+            {
+                "criticality_index": 6.0,
+                "risk_level": "high",
+                "reasons": ["Semantic destruction increases criticality by 3.0."],
+                "semantic_metrics": {
+                    "old_node_count": 10,
+                    "new_node_count": 4,
+                    "old_token_count": 5,
+                    "new_token_count": 2,
+                    "matched_node_count": 1,
+                    "survival_ratio": 0.2,
+                },
+                "path_category": "normal",
+                "path_severity": "medium",
+            }
+        )
+    )
+    monkeypatch.setattr("importlib.import_module", lambda name: fake_kernel)
+
+    result = evaluate_criticality(
+        RustCriticalityInput(
+            file_path="src/service.py",
+            action_type="modified",
+            old_code="def important():\n    return True\n",
+            new_code="def replacement():\n    return False\n",
+        )
+    )
+
+    assert result == RustCriticalityAssessment(
+        criticality_index=6.0,
+        risk_level="high",
+        reasons=("Semantic destruction increases criticality by 3.0.",),
+        semantic_metrics=RustSemanticMetrics(
+            old_node_count=10,
+            new_node_count=4,
+            old_token_count=5,
+            new_token_count=2,
+            matched_node_count=1,
+            survival_ratio=0.2,
+        ),
+        path_category="normal",
+        path_severity="medium",
+    )
+
+
+def test_rust_kernel_adapter_rejects_null_criticality_index(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from rygnal.rust_kernel import (
+        RustCriticalityInput,
+        RustKernelError,
+        evaluate_criticality,
+    )
+
+    fake_kernel = types.SimpleNamespace(
+        evaluate_criticality=lambda payload: json.dumps(
+            {
+                "criticality_index": None,
+                "risk_level": "low",
+                "reasons": [],
+                "semantic_metrics": {
+                    "old_node_count": 1,
+                    "new_node_count": 1,
+                    "old_token_count": 1,
+                    "new_token_count": 1,
+                    "matched_node_count": 1,
+                    "survival_ratio": 1.0,
+                },
+                "path_category": "normal",
+                "path_severity": "medium",
+            }
+        )
+    )
+    monkeypatch.setattr("importlib.import_module", lambda name: fake_kernel)
+
+    with pytest.raises(RustKernelError, match="invalid or missing criticality_index"):
+        evaluate_criticality(
+            RustCriticalityInput(
+                file_path="src/service.py",
+                action_type="modified",
+            )
+        )
+
+
+def test_rust_kernel_adapter_wraps_structured_criticality_domain_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from rygnal.rust_kernel import (
+        RustCriticalityEvaluationError,
+        RustCriticalityInput,
+        evaluate_criticality,
+    )
+
+    class CriticalityEvaluationError(Exception):
+        pass
+
+    def reject(payload: str) -> str:
+        raise CriticalityEvaluationError(
+            json.dumps(
+                {
+                    "error_code": "parent-traversal",
+                    "reason": "path must not traverse outside repository",
+                }
+            )
+        )
+
+    fake_kernel = types.SimpleNamespace(
+        CriticalityEvaluationError=CriticalityEvaluationError,
+        evaluate_criticality=reject,
+    )
+    monkeypatch.setattr("importlib.import_module", lambda name: fake_kernel)
+
+    with pytest.raises(RustCriticalityEvaluationError) as exc_info:
+        evaluate_criticality(
+            RustCriticalityInput(
+                file_path="../evil.py",
+                action_type="modified",
+            )
+        )
+
+    assert exc_info.value.error_code == "parent-traversal"
+    assert exc_info.value.reason == "path must not traverse outside repository"
+
+
+def test_rust_kernel_adapter_wraps_missing_criticality_function(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from rygnal.rust_kernel import (
+        RustCriticalityInput,
+        RustKernelError,
+        evaluate_criticality,
+    )
+
+    fake_kernel = types.SimpleNamespace()
+    monkeypatch.setattr("importlib.import_module", lambda name: fake_kernel)
+
+    with pytest.raises(RustKernelError, match="does not expose evaluate_criticality"):
+        evaluate_criticality(
+            RustCriticalityInput(
+                file_path="src/service.py",
+                action_type="modified",
+            )
+        )
+
+
+def test_rust_kernel_adapter_rejects_invalid_criticality_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from rygnal.rust_kernel import (
+        RustCriticalityInput,
+        RustKernelError,
+        evaluate_criticality,
+    )
+
+    fake_kernel = types.SimpleNamespace(evaluate_criticality=lambda payload: "not json")
+    monkeypatch.setattr("importlib.import_module", lambda name: fake_kernel)
+
+    with pytest.raises(RustKernelError, match="invalid JSON"):
+        evaluate_criticality(
+            RustCriticalityInput(
+                file_path="src/service.py",
+                action_type="modified",
+            )
+        )
+
+
+def test_rust_kernel_adapter_wraps_unicode_boundary_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from rygnal.rust_kernel import (
+        RustCriticalityInput,
+        RustKernelError,
+        evaluate_criticality,
+    )
+
+    def reject(payload: str) -> str:
+        raise UnicodeEncodeError("utf-8", "\ud800", 0, 1, "surrogates not allowed")
+
+    fake_kernel = types.SimpleNamespace(evaluate_criticality=reject)
+    monkeypatch.setattr("importlib.import_module", lambda name: fake_kernel)
+
+    with pytest.raises(RustKernelError, match="native criticality boundary failed"):
+        evaluate_criticality(
+            RustCriticalityInput(
+                file_path="src/service.py",
+                action_type="modified",
+                old_code="\ud800",
+                new_code="def ok():\n    return True\n",
+            )
+        )
+
+
+def test_rust_kernel_adapter_reports_native_load_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from rygnal.rust_kernel import (
+        RustCriticalityInput,
+        RustKernelUnavailableError,
+        evaluate_criticality,
+    )
+
+    def fail_import(name: str) -> object:
+        raise ImportError("native wheel failed to load")
+
+    monkeypatch.setattr("importlib.import_module", fail_import)
+
+    with pytest.raises(RustKernelUnavailableError, match="failed to load"):
+        evaluate_criticality(
+            RustCriticalityInput(
+                file_path="src/service.py",
+                action_type="modified",
+            )
+        )
